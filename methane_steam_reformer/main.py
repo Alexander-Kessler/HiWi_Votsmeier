@@ -57,6 +57,12 @@ class generate_data():
             A (float): cross section tube [m2]
             rho_b (float): density fixed bed [kg m-3]
             V_dot (float): volumetric flow rate [m^3 h-1]
+            d_pi (float): inner catalyst ring diameter [m]
+            d_in (float): diameter inner tube [m]
+            d_out (float): diameter outer tube [m]
+            em (float): emmissivity for heat transfer [-]
+            epsilon (float): void fraction cat.-bet [-]
+            lambda_s (float): radial thermal conductivity fixed bed [W m-1 K-1]
             cp_coef (2D-array): coefficients of the NASA polynomials [j mol-1 K-1]
             H_0 (1D-array): enthalpies of formation [J mol-1]
             S_0 (1D-array): entropy of formation [J mol-1 K-1]
@@ -87,6 +93,13 @@ class generate_data():
         self.A = 0.0081
         self.rho_b = 1.3966*1e3
         self.V_dot_0 = self.u0 * 3600 * self.A
+        self.d_pi = 0.0084
+        self.d_in = 0.1016
+        self.d_out = 0.1322
+        self.em = 0.8
+        self.epsilon = 0.4 + 0.05 * self.d_pi/self.d_in + 0.412 * \
+            self.d_pi**2/self.d_in**2
+        self.lambda_s = 0.3489
         
         self.cp_coef = np.array([[19.238,52.09*1e-3,11.966*1e-6,-11.309*1e-9], \
                                  [32.22,1.9225*1e-3,10.548*1e-6,-3.594*1e-9], \
@@ -159,32 +172,32 @@ class generate_data():
         self.x_CO2 = n_matrix[:,4]/np.sum(n_matrix, axis=1)
         self.x_N2 = n_matrix[:,5]/np.sum(n_matrix, axis=1)
     
-    def calc_area_radii(self, temperature, mole_fractions):
-        def calc_mu_gas(T, x_i):
-            #NASA Polynomial in CGS-Unit µP (Poise)
-            mu_CH4 = 3.844 + 4.0112*1e-1*T + -1.4303*1e-4*T**2
-            mu_H2O = -36.826 + 4.29*1e-1*T + -1.62*1e-5*T**2
-            mu_H2 = 27.758 + 2.12*1e-1*T + -3.28*1e-5*T**2
-            mu_CO = 23.811 + 5.3944*1e-1*T + -1.5411*1e-4*T**2
-            mu_CO2 = 11.811 + 4.9838*1e-1*T + -1.0851*1e-4*T**2
-            mu_N2 = 42.606 + 4.75*1e-1*T + -9.88*1e-5*T**2
+    def calc_mu_gas(self, T, x_i):
+        #NASA Polynomial in CGS-Unit µP (Poise)
+        mu_CH4 = 3.844 + 4.0112*1e-1*T + -1.4303*1e-4*T**2
+        mu_H2O = -36.826 + 4.29*1e-1*T + -1.62*1e-5*T**2
+        mu_H2 = 27.758 + 2.12*1e-1*T + -3.28*1e-5*T**2
+        mu_CO = 23.811 + 5.3944*1e-1*T + -1.5411*1e-4*T**2
+        mu_CO2 = 11.811 + 4.9838*1e-1*T + -1.0851*1e-4*T**2
+        mu_N2 = 42.606 + 4.75*1e-1*T + -9.88*1e-5*T**2
+        
+        mu_gas = np.array([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2]) * 1e-6 # µP -> P
+        
+        # Method of Wilke:
+        # Simple and Accurate Method for Calculating Viscosity of Gaseous
+        # Mixtures by Thomas A. Davidson
+        mu_mix = 0
+        phi = np.zeros([len(x_i),len(x_i)])
+        for i in range(len(x_i)):
+            for j in range(len(x_i)):
+                phi[i,j] = (1 + (mu_gas[i]/mu_gas[j])**(0.5) * (self.MW[j]/self.MW[i])**(0.25))**2/ \
+                    (8*(1 + (self.MW[i]/self.MW[j]) ))**(0.5)
+            mu_mix = mu_mix + x_i[i]*mu_gas[i]/(np.dot(phi[i,:],x_i))
             
-            mu_gas = np.array([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2]) * 1e-6 # µP -> P
-            
-            # Method of Wilke:
-            # Simple and Accurate Method for Calculating Viscosity of Gaseous
-            # Mixtures by Thomas A. Davidson
-            mu_mix = 0
-            phi = np.zeros([len(x_i),len(x_i)])
-            for i in range(len(x_i)):
-                for j in range(len(x_i)):
-                    phi[i,j] = (1 + (mu_gas[i]/mu_gas[j])**(0.5) * (self.MW[j]/self.MW[i])**(0.25))**2/ \
-                        (8*(1 + (self.MW[i]/self.MW[j]) ))**(0.5)
-                mu_mix = mu_mix + x_i[i]*mu_gas[i]/(np.dot(phi[i,:],x_i))
-                
-            mu_mix = mu_mix * 0.1 # Convert CGS-Unit Poise to SI-Unit Pa*s 
-            return mu_mix
-            
+        mu_mix = mu_mix * 0.1 # Convert CGS-Unit Poise to SI-Unit Pa*s 
+        return mu_mix
+    
+    def calc_area_radii(self, temperature, mole_fractions): 
         def calc_rho_gas(T, x_i):
             # Calculate density of gas mixture via ideal gas (mixing rule = Dalton)
             rho_gas = np.sum(np.multiply((x_i*self.p*1e5),self.MW))/(self.R * T)
@@ -194,7 +207,7 @@ class generate_data():
         mu_gas = np.zeros([self.n_elements,1])
         rho_gas = np.zeros([self.n_elements,1])
         for i in range(self.n_elements):
-            mu_gas[i] = calc_mu_gas(temperature[i], mole_fractions[i::self.n_elements])
+            mu_gas[i] = self.calc_mu_gas(temperature[i], mole_fractions[i::self.n_elements])
             rho_gas[i] = calc_rho_gas(temperature[i], mole_fractions[i::self.n_elements])
         
         area_elements_devided_by_total_area = np.divide(mu_gas,rho_gas)/\
@@ -334,7 +347,7 @@ class generate_data():
 
         return [dn_dz, r_total]
     
-    def heat_balance(self, r_total, u_gas):
+    def heat_balance(self, mole_fractions, temperature, r_total, flow_velocity, radii_elements):
         """
         Calculation of the derivatives of the temperature according to the 
         reactor length.
@@ -351,22 +364,98 @@ class generate_data():
             dTdz (float): derivatives of the temperature in dependence of the 
                           reactor length [K m-1]
         """
+        def calc_lambda_gas(T, x_i):
+            # Calculates the conductivities of the single components lambda_i and then
+            # the gas mixture conductivity.
+            # PHYSICAL PROPERTIES OF LIQUIDS AND GASES
+            lambda_CH4 = -0.00935 + 1.4028*1e-4*T + 3.318*1e-8*T**2
+            lambda_H2O = 0.00053 + 4.7093*1e-5*T + 4.9551*1e-8*T**2
+            lambda_H2 = 0.03951 + 4.5918*1e-4*T + -6.4933*1e-8*T**2
+            lambda_CO = 0.00158 + 8.2511*1e-5*T + -1.9081*1e-8*T**2
+            lambda_CO2 = -0.012 + 1.0208*1e-4*T + -2.2403*1e-8*T**2
+            lambda_N2 = 0.00309 + 7.593*1e-5*T + -1.1014*1e-8*T**2
+
+            lmbd_gas = np.array([lambda_CH4, lambda_H2O, lambda_H2, lambda_CO, lambda_CO2, lambda_N2])
+            
+            # Method of Wassiljewa:
+            # Simple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
+            # by Thomas A. Davidson
+            # Calculation A(i,j) by Mason, Saxena: Mason EA, Saxena SC. Approximate 
+            # formula for the thermal conductivity of gas mixtures. 
+            lmbd_mix = 0
+            A = np.zeros([len(x_i), len(x_i)])
+            for i in range(len(x_i)):
+                for j in range(len(x_i)):
+                    A[i,j] = (1 + (lmbd_gas[i]/lmbd_gas[j])**(0.5) * (self.MW[i]/self.MW[j])**(0.25))**2/ \
+                        (8*(1 + (self.MW[i]/self.MW[j]) ))**(0.5)
+                     
+                lmbd_mix = lmbd_mix + x_i[i]*lmbd_gas[i]/np.dot(A[i,:], x_i)
+            
+            return lmbd_mix
+                    
+        def calc_heat_transfer(T, x_i, rho_g, cp_i, u_gas):
+            mu_g = self.calc_mu_gas(T, x_i)
+            lmbd_g = calc_lambda_gas(T, x_i)
+            cps_g_mix = np.dot(x_i, (cp_i * (1/self.MW)))
+            l_c = self.d_pi
+            N_Re = rho_g * u_gas * l_c / mu_g
+            N_Pr = cps_g_mix * mu_g / lmbd_g;
+
+            a_w = (1 - 1.5 * (self.d_in/self.d_pi)**(-1.5)) * \
+                   (lmbd_g * 3.6)/self.d_pi * N_Re**(0.59) * N_Pr**(1/3);
+            a_rs = 0.8171*(self.em/(2-self.em))*(T/100)**(3);
+            a_ru = (0.8171*(T/100)**(3))/(1+self.epsilon/2 * (1-self.epsilon) * \
+                    (1-self.em)/self.em);
+
+            lmbd_er_0 = self.epsilon*(lmbd_g*3.6 + 0.95*a_ru*self.d_pi) + \
+                        (0.95 * (1 - self.epsilon))/(2/(3*self.lambda_s*3.6) + \
+                        1/(10 * lmbd_g*3.6 + a_rs * self.d_pi))
+            
+            lmbd_er = lmbd_er_0 + 0.111 * lmbd_g*3.6 * (N_Re * N_Pr**(1/3))/(1 + 46 * \
+                      (self.d_pi/self.d_out)**(2))
+            
+            return (a_w, lmbd_er)
+
+        # Calculate heat flow rate
+        heat_flow_rate = np.zeros([self.n_elements+1,1])
+        mult_density_gas_cp = np.zeros([self.n_elements,1])
+        for i in range(self.n_elements):
+            density_gas = np.sum(self.p * 1e5 * mole_fractions[i::self.n_elements] * self.MW) / \
+                                (self.R * temperature[i])
+            cp_i = self.cp_coef[:,0] + self.cp_coef[:,1] * temperature[i] + self.cp_coef[:,2] * \
+                temperature[i]**2 + self.cp_coef[:,3] * temperature[i]**3
+            alpha_w_int, lambda_rad = calc_heat_transfer(temperature[i],\
+                mole_fractions[i::self.n_elements], density_gas, cp_i, flow_velocity)
+            
+            cp_gas = np.dot(mole_fractions[i::self.n_elements],cp_i/self.MW)
+            mult_density_gas_cp[i] = cp_gas*density_gas*1e3
+            
+            if i == 1:
+                # first boundary condition
+                heat_flow_rate[i] = 0
+            elif i == self.n_elements-1:
+                heat_flow_rate[i] = lambda_rad*(temperature[i-1]-temperature[i])/(radii_elements[i+1]-radii_elements[i])
+                # second boundary condition
+                heat_flow_rate[-1] = (alpha_w_int*lambda_rad/(0.5*(radii_elements[i+1]-radii_elements[i])))/ \
+                    (alpha_w_int+(lambda_rad/(0.5*(radii_elements[i+1]-radii_elements[i]))))* (temperature[-1]-self.T_wall)
+            else:
+        	    heat_flow_rate[i] = lambda_rad*(temperature[i-1]-temperature[i])/(radii_elements[i+1]-radii_elements[i])
         
-        ## Heat balance
-        # Calculation of the source term for the reaction
-        Kp, H_R = generate_data.calculate_thermo_properties(self)
-        s_H = -(H_R * 1e3) * self.eta * r_total * self.rho_b
-        
-        # Calculation of the source term for external heat exchange
-        density_gas = np.sum(self.p * 1e5 * self.mole_fractions * self.MW) / (self.R * self.T)
-        cp = self.cp_coef[:,0] + self.cp_coef[:,1] * self.T + self.cp_coef[:,2] * \
-            self.T**2 + self.cp_coef[:,3] * self.T**3
-        s_H_ext = -self.U_perV * 1e3 * (self.T - self.T_wall)
-        
-        # Calculate derivative for the heat balance
-        dTdz = (np.sum(s_H)+s_H_ext) / (u_gas * 3.6 * np.matmul(self.mole_fractions,(cp/self.MW)) * density_gas * 1e3)
-        
+        # Calculate derivative of the heat balance
+        dTdz = np.zeros([self.n_elements,1])
+        for i in range(self.n_elements):
+            dr = radii_elements[i+1]-radii_elements[i]
+            # Calculation of the source term for external heat exchange
+            dTdz_cond = (radii_elements[i]*heat_flow_rate[i]*1e3 - radii_elements[i+1]*heat_flow_rate[i+1]*1e3)/ \
+                (dr *(radii_elements[i]+dr*0.5)*mult_density_gas_cp[i]*flow_velocity*3.600)
+            # Calculation of the source term for the reaction
+            Kp, H_R = generate_data.calculate_thermo_properties(self, temperature[i])
+            s_H = -np.sum((H_R*1e3)*(r_total[i,:])*self.rho_b)
+            dTdz_react = s_H/(mult_density_gas_cp[i]*flow_velocity*3.600)
+            dTdz[i] = dTdz_cond+dTdz_react           
+            
         return dTdz
+        
     
     def ODEs(y,z,self):
         """
@@ -400,8 +489,7 @@ class generate_data():
         dn_dz, r_total = generate_data.xu_froment(self, temperature, partial_pressures, area_elements)
         
         ## Heat balance
-        !!! -> Ab hier weiter machen
-        dTdz = generate_data.heat_balance(self, r_total, flow_velocity)
+        dTdz = generate_data.heat_balance(self, mole_fractions, temperature, r_total, flow_velocity, radii_elements)
         
         # Combine derivatives
         dydz = np.append(dn_dz, dTdz)
@@ -434,6 +522,7 @@ class generate_data():
         y = odeint(generate_data.ODEs, y_0, reactor_lengths, args=(self,))
         
         # Calculate mole fractions
+        !!! -> hier geht es weiter
         generate_data.calc_mole_fractions_results(self, y[:,:6])
         
         # Store temperature
