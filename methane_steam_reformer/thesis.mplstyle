@@ -1,0 +1,10 @@
+#plt.rcParams in der Console ausführen, zeigt alle default werte
+axes.labelsize : 14
+xtick.labelsize : 14
+ytick.labelsize : 14
+figure.autolayout : True
+axes.prop_cycle : cycler(color=['e60049', '0bb4ff', '50e991', 'e6d800', '9b19f5', 'ffa300', 'dc0ab4', 'b3d4ff', '00bfa0'])
+lines.linestyle : -
+lines.linewidth : 1.5
+legend.fontsize : 14
+axes.formatter.limits: -2, 2
