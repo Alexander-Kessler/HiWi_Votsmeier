@@ -55,7 +55,6 @@ class generate_data():
             G_R_0 (1D-array): adsorption enthalpy [J mol-1]
             R (float): gas constant [J K-1 mol-1]
             A (float): cross section tube [m2]
-            rho_b (float): density fixed bed [kg m-3]
             V_dot (float): volumetric flow rate [m^3 h-1]
             d_pi (float): inner catalyst ring diameter [m]
             d_in (float): diameter inner tube [m]
@@ -63,11 +62,12 @@ class generate_data():
             em (float): emmissivity for heat transfer [-]
             epsilon (float): void fraction cat.-bet [-]
             lambda_s (float): radial thermal conductivity fixed bed [W m-1 K-1]
+            rho_s (float): density of solid material in fixed bed [kg m-3]
+            rho_b (float): density fixed bed [kg m-3]
             cp_coef (2D-array): coefficients of the NASA polynomials [j mol-1 K-1]
             H_0 (1D-array): enthalpies of formation [J mol-1]
             S_0 (1D-array): entropy of formation [J mol-1 K-1]
             MW (1D-array): molecular weight [kg mol-1]
-            U_perV (float): thermal transmittance [kJ m-3 h-1 K-1]
         """
         
         self.x_CH4_0 = inlet_mole_fractions[0]
@@ -89,17 +89,18 @@ class generate_data():
         self.E_A = np.array([240.1*1e3,67.13*1e3,243.9*1e3])
         self.K_ads_0 = np.array([8.23*1e-5*1e-5,6.12*1e-9*1e-5,6.65*1e-4*1e-5,1.77*1e5])
         self.G_R_ads = np.array([-70.61*1e3,-82.90*1e3,-38.28*1e3,88.68*1e3])
-        self.R = 8.314472
-        self.A = 0.0081
-        self.rho_b = 1.3966*1e3
-        self.V_dot_0 = self.u0 * 3600 * self.A
+        self.R = 8.3145
         self.d_pi = 0.0084
         self.d_in = 0.1016
         self.d_out = 0.1322
+        self.A = math.pi * (self.d_in/2)**2
+        self.V_dot_0 = self.u0 * 3600 * self.A
         self.em = 0.8
         self.epsilon = 0.4 + 0.05 * self.d_pi/self.d_in + 0.412 * \
             self.d_pi**2/self.d_in**2
         self.lambda_s = 0.3489
+        self.rho_s = 2355
+        self.rho_b = self.rho_s * (1-self.epsilon)
         
         self.cp_coef = np.array([[19.238,52.09*1e-3,11.966*1e-6,-11.309*1e-9], \
                                  [32.22,1.9225*1e-3,10.548*1e-6,-3.594*1e-9], \
@@ -110,7 +111,6 @@ class generate_data():
         self.H_0 = np.array([-74850, -241820, 0, -110540, -393500])
         self.S_0 = np.array([-80.5467, -44.3736, 0,	89.6529, 2.9515])
         self.MW = np.array([16.043, 18.02, 2.016, 28.01, 44.01, 28.01]) * 1e-3
-        self.U_perV = 2.3e+05
         
         self.n_elements = n_elements
         
@@ -155,22 +155,6 @@ class generate_data():
             mole_fractions[i::self.n_elements] = mole_fraction_element
         
         return mole_fractions
-    
-    def calc_mole_fractions_results(self, n_matrix):
-        """
-        Calculate the mole fractions of all species.
-        
-        Args:
-            n_matrix (2D-array): Ammount of substances of all species depending 
-                                 of the reactor length [kmol h-1]
-        """
-        
-        self.x_CH4 = n_matrix[:,0]/np.sum(n_matrix, axis=1)
-        self.x_H2O = n_matrix[:,1]/np.sum(n_matrix, axis=1)
-        self.x_H2 = n_matrix[:,2]/np.sum(n_matrix, axis=1)
-        self.x_CO = n_matrix[:,3]/np.sum(n_matrix, axis=1)
-        self.x_CO2 = n_matrix[:,4]/np.sum(n_matrix, axis=1)
-        self.x_N2 = n_matrix[:,5]/np.sum(n_matrix, axis=1)
     
     def calc_mu_gas(self, T, x_i):
         #NASA Polynomial in CGS-Unit µP (Poise)
@@ -456,6 +440,33 @@ class generate_data():
             
         return dTdz
         
+    def calc_results(self, y):
+        """
+        Calculate the 
+        
+        Args:
+            n_matrix (2D-array): Ammount of substances of all species depending 
+                                 of the reactor length [kmol h-1]
+        """
+        
+        # Calculate mole fractions
+        self.x_CH4 = np.sum(y[:,0*self.n_elements:1*self.n_elements],axis=1)/np.sum(y[:,:6*self.n_elements], axis=1)
+        self.x_H2O = np.sum(y[:,1*self.n_elements:2*self.n_elements],axis=1)/np.sum(y[:,:6*self.n_elements], axis=1)
+        self.x_H2 = np.sum(y[:,2*self.n_elements:3*self.n_elements],axis=1)/np.sum(y[:,:6*self.n_elements], axis=1)
+        self.x_CO = np.sum(y[:,3*self.n_elements:4*self.n_elements],axis=1)/np.sum(y[:,:6*self.n_elements], axis=1)
+        self.x_CO2 = np.sum(y[:,4*self.n_elements:5*self.n_elements],axis=1)/np.sum(y[:,:6*self.n_elements], axis=1)
+        self.x_N2 = np.sum(y[:,5*self.n_elements:6*self.n_elements],axis=1)/np.sum(y[:,:6*self.n_elements], axis=1)
+        
+        # Calculate conversion of CH4
+        self.X_CH4 = (np.sum(y[0,:self.n_elements])-np.sum(y[:,:self.n_elements],axis=1)) / \
+            np.sum(y[0,:self.n_elements])
+        
+        # Calculate yield of CO2
+        self.Y_CO2 = (np.sum(y[:,4*self.n_elements:5*self.n_elements],axis=1)-np.sum(y[0,4*self.n_elements:5*self.n_elements])) / \
+            np.sum(y[0,:self.n_elements])
+            
+        # Calculate temperature
+        self.T_avg = np.sum(y[:,6*self.n_elements:],axis=1)/self.n_elements
     
     def ODEs(y,z,self):
         """
@@ -479,7 +490,7 @@ class generate_data():
         
         # Calculate the element area and radii with darcy's law
         area_elements, radii_elements = generate_data.calc_area_radii(self, temperature, mole_fractions)
-        
+
         # Calculation of the flow velocity as a function of the gas composition 
         # and temperature
         flow_velocity = generate_data.calc_flow_velocity(self, mole_fractions, area_elements, temperature)
@@ -521,43 +532,48 @@ class generate_data():
         # Solve ODE for isotherm, adiabatic or polytrop reactor
         y = odeint(generate_data.ODEs, y_0, reactor_lengths, args=(self,))
         
-        # Calculate mole fractions
-        !!! -> hier geht es weiter
-        generate_data.calc_mole_fractions_results(self, y[:,:6])
-        
-        # Store temperature
-        self.T = y[:,6]
+        # Calculate mole fraction, conversion and yield
+        generate_data.calc_results(self, y)
         
         # Plotting results from the ODE-Solver
         if plot:
-            generate_data.plot(self, reactor_lengths)
-            
+            generate_data.plot(self, reactor_lengths, y[:,6*self.n_elements:])
+        
         return y
     
-    def plot(self, reactor_lengths):
+    def plot(self, reactor_lengths, T_2D):
         """
         Plotting results from the ODE-Solver.
         """
         
+        fig = plt.figure(figsize=(10,7))
         # Mole fractions plot
-        plt.figure()
-        plt.plot(reactor_lengths, self.x_CH4, '-', label=r'$x_{\rm{CH_{4}}}$')
-        plt.plot(reactor_lengths, self.x_H2O, '-', label=r'$x_{\rm{H_{2}O}}$')
-        plt.plot(reactor_lengths, self.x_H2, '-', label=r'$x_{\rm{H_{2}}}$')
-        plt.plot(reactor_lengths, self.x_CO, '-', label=r'$x_{\rm{CO}}$')
-        plt.plot(reactor_lengths, self.x_CO2, '-', label=r'$x_{\rm{CO_{2}}}$')
-        plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
-        plt.ylabel(r'$mole\:fractions$')
-        plt.ylim(0,0.75)
-        plt.xlim(reactor_lengths[0],reactor_lengths[-1])
-        plt.legend(loc='center right')
+        ax1 = fig.add_subplot(221)
+        ax1.plot(reactor_lengths, self.x_CH4, '-', label=r'$x_{\rm{CH_{4}}}$')
+        ax1.plot(reactor_lengths, self.x_H2O, '-', label=r'$x_{\rm{H_{2}O}}$')
+        ax1.plot(reactor_lengths, self.x_H2, '-', label=r'$x_{\rm{H_{2}}}$')
+        ax1.plot(reactor_lengths, self.x_CO, '-', label=r'$x_{\rm{CO}}$')
+        ax1.plot(reactor_lengths, self.x_CO2, '-', label=r'$x_{\rm{CO_{2}}}$')
+        ax1.set_xlabel(r'$reactor\:length\:/\:\rm{m}$')
+        ax1.set_ylabel(r'$mole\:fractions$')
+        ax1.set_ylim(0,0.8)
+        ax1.set_xlim(reactor_lengths[0],reactor_lengths[-1])
+        ax1.legend(loc='center right')
         
         # Temperature plot
-        plt.figure()
-        plt.plot(reactor_lengths, self.T, 'r-', label='temperature')
-        plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
-        plt.ylabel(r'$temperature\:/\:\rm{K}$')
-        plt.xlim(reactor_lengths[0],reactor_lengths[-1])
+        ax2 = fig.add_subplot(222)
+        ax2.plot(reactor_lengths, self.T_avg, 'r-', label='temperature')
+        ax2.set_xlabel(r'$reactor\:length\:/\:\rm{m}$')
+        ax2.set_ylabel(r'$temperature\:/\:\rm{K}$')
+        ax2.set_xlim(reactor_lengths[0],reactor_lengths[-1])
+        
+        # 2D temperature plot
+        ax3 = fig.add_subplot(212)
+        T_2D = T_2D.transpose()
+        T_2D = np.concatenate((np.flip(T_2D, axis=0),T_2D), axis=0)
+        !!! -> Calculate radii and complete themperature plot + Bugfixing (hint: look at temperature from 2D-T-plot)
+        #surface = ax3.plot_surface(reactor_lengths, y, T_2D, rstride=5, cstride=5, cmap='viridis')
+        #ax3.view_init(elev=90, azim=0)
 
     
 class NeuralNetwork(torch.nn.Module):
@@ -1236,12 +1252,12 @@ if __name__ == "__main__":
     # Define parameters for the model
     reactor_lengths = np.linspace(0,12,num=100)
     inlet_mole_fractions = [0.2128,0.714,0.0259,0.0004,0.0119,0.035] #CH4,H20,H2,CO,CO2,N2
-    bound_conds = [25.7,2.14,793,1100] #p,u,T_in,T_wall
+    bound_conds = [25.7,2.14,793,1100] #p,u_in,T_in,T_wall
     reactor_conds = [0.007] #eta
     n_elements = 10
     
-    plot_analytical_solution = False #True,False
-    
+    plot_analytical_solution = True #True,False
+    """
     input_size_NN = 1
     hidden_size_NN = 32
     output_size_NN = 6
@@ -1250,19 +1266,19 @@ if __name__ == "__main__":
     weight_factors = [1e1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
     epsilon = 0.05 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training
-    
+    """
     
     # Calculation of the analytical curves
     model = generate_data(inlet_mole_fractions, bound_conds, reactor_conds, n_elements)
-    model.solve_ode(reactor_lengths, plot=plot_analytical_solution)
+    y = model.solve_ode(reactor_lengths, plot=plot_analytical_solution)
     
-    analytical_solution_x_CH4 = model.x_CH4
-    analytical_solution_x_H20 = model.x_H2O
-    analytical_solution_x_H2 = model.x_H2
-    analytical_solution_x_CO = model.x_CO
-    analytical_solution_x_CO2 = model.x_CO2
-    analytical_solution_x_N2 = model.x_N2
-    analytical_solution_T = model.T
+    #analytical_solution_x_CH4 = model.x_CH4
+    #analytical_solution_x_H20 = model.x_H2O
+    #analytical_solution_x_H2 = model.x_H2
+    #analytical_solution_x_CO = model.x_CO
+    #analytical_solution_x_CO2 = model.x_CO2
+    #analytical_solution_x_N2 = model.x_N2
+    #analytical_solution_T = model.T
     
     """
     # Set up the neural network
