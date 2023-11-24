@@ -414,7 +414,7 @@ class generate_data():
             cp_gas = np.dot(mole_fractions[i::self.n_elements],cp_i/self.MW)
             mult_density_gas_cp[i] = cp_gas*density_gas*1e3
             
-            if i == 1:
+            if i == 0:
                 # first boundary condition
                 heat_flow_rate[i] = 0
             elif i == self.n_elements-1:
@@ -424,7 +424,7 @@ class generate_data():
                     (alpha_w_int+(lambda_rad/(0.5*(radii_elements[i+1]-radii_elements[i]))))* (temperature[-1]-self.T_wall)
             else:
         	    heat_flow_rate[i] = lambda_rad*(temperature[i-1]-temperature[i])/(radii_elements[i+1]-radii_elements[i])
-        
+
         # Calculate derivative of the heat balance
         dTdz = np.zeros([self.n_elements,1])
         for i in range(self.n_elements):
@@ -467,6 +467,14 @@ class generate_data():
             
         # Calculate temperature
         self.T_avg = np.sum(y[:,6*self.n_elements:],axis=1)/self.n_elements
+        
+        # Calculate radii for 2D temperature plot
+        radii_2D = np.zeros([self.n_elements+1,len(y)])
+        for i in range(len(y)):
+            area_elements, radii_elements = self.calc_area_radii(y[i,6*self.n_elements:], y[i,:6*self.n_elements])
+            radii_2D[:,i] = np.squeeze(radii_elements)
+        self.radii_2D = radii_2D
+        
     
     def ODEs(y,z,self):
         """
@@ -554,26 +562,65 @@ class generate_data():
         ax1.plot(reactor_lengths, self.x_H2, '-', label=r'$x_{\rm{H_{2}}}$')
         ax1.plot(reactor_lengths, self.x_CO, '-', label=r'$x_{\rm{CO}}$')
         ax1.plot(reactor_lengths, self.x_CO2, '-', label=r'$x_{\rm{CO_{2}}}$')
-        ax1.set_xlabel(r'$reactor\:length\:/\:\rm{m}$')
-        ax1.set_ylabel(r'$mole\:fractions$')
+        ax1.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
+        ax1.set_ylabel(r'$\rm{mole}\:\:\rm{fraction}$')
         ax1.set_ylim(0,0.8)
         ax1.set_xlim(reactor_lengths[0],reactor_lengths[-1])
         ax1.legend(loc='center right')
         
+        ax1.tick_params(labelbottom=True, labeltop=False, labelleft=True, labelright=False,
+                        bottom=True, top=True, left=True, right=True, direction='in')
+        
         # Temperature plot
         ax2 = fig.add_subplot(222)
         ax2.plot(reactor_lengths, self.T_avg, 'r-', label='temperature')
-        ax2.set_xlabel(r'$reactor\:length\:/\:\rm{m}$')
-        ax2.set_ylabel(r'$temperature\:/\:\rm{K}$')
+        ax2.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
+        ax2.set_ylabel(r'$\rm{temperature}\:/\:\rm{K}$')
         ax2.set_xlim(reactor_lengths[0],reactor_lengths[-1])
         
+        ax2.tick_params(labelbottom=True, labeltop=False, labelleft=True, labelright=False,
+                        bottom=True, top=True, left=True, right=True, direction='in')
+        
+        plt.tight_layout()
+        
+        fig = plt.figure(figsize=(10,7))
         # 2D temperature plot
-        ax3 = fig.add_subplot(212)
+        ax3 = fig.add_subplot(111, projection='3d')
         T_2D = T_2D.transpose()
-        T_2D = np.concatenate((np.flip(T_2D, axis=0),T_2D), axis=0)
-        !!! -> Calculate radii and complete themperature plot + Bugfixing (hint: look at temperature from 2D-T-plot)
-        #surface = ax3.plot_surface(reactor_lengths, y, T_2D, rstride=5, cstride=5, cmap='viridis')
-        #ax3.view_init(elev=90, azim=0)
+        T_2D = np.concatenate((np.flip(T_2D, axis=0),T_2D[0,:].reshape((1, 100)),T_2D), axis=0)
+        radii_2D = self.radii_2D
+        radii_2D = np.concatenate((np.flip(radii_2D, axis=0),-1*radii_2D[1:,:]), axis=0)
+        
+        surf = ax3.plot_surface(reactor_lengths, radii_2D*1e3, T_2D, cmap='viridis', edgecolors='k', linewidth=0.5, antialiased=True)
+        ax3.view_init(elev=90, azim=-90)
+        
+        ax3.set_xlim(reactor_lengths[0],reactor_lengths[-1])
+        ax3.set_zticks([])
+        
+        cbar = fig.colorbar(surf, shrink=0.7)
+        cbar.ax.set_ylabel(r'$\rm{temperature}\:/\:\rm{K}$')
+        
+        ax3.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
+        ax3.set_ylabel(r'$\rm{radius}\:/\:10^{-3}\rm{m}$')
+        
+        plt.title('Temperature profile 2D reactor')
+        
+        # Make panes transparent
+        ax3.xaxis.pane.fill = False
+        ax3.yaxis.pane.fill = False
+        ax3.zaxis.pane.fill = False
+        
+        # Remove grid lines
+        ax3.grid(False)
+        
+        # Transparent spines
+        ax3.zaxis.line.set_color((1.0, 1.0, 1.0, 0.0))
+        
+        # Transparent panes
+        ax3.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax3.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        
+        plt.tight_layout()
 
     
 class NeuralNetwork(torch.nn.Module):
