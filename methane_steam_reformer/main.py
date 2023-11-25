@@ -1,19 +1,27 @@
 """
 Calculation of an industrial steam reformer considering the steam reforming 
-reaction, water gas shift reaction and the direct reforming reaction. The reactor 
-model corresponds to the final project of the Matlab course, except that a 
-constant value for the thermal transmittance is assumed here. First, the 
+reaction, water gas shift reaction and the direct reforming reaction. The 
+reactor reactor model corresponds to the final project of the Matlab course 
+and is a pseudo-homogeneous fixed-bed reactor that is solved in two dimensions. 
+In the heat balance, the heat transfer is resolved radially instead of a heat 
+transfer coefficient U. The radial discretisation is carried out using the 
+finite volume method with dynamic volume element sizes. A pressure gradient 
+occurs in the reactor in the radial direction, which is why the volume element 
+sizes are varied according to Darcy's law. The variables of species and 
+temperature are solved in each volume element with its own temperature. The 
+balancing takes place from the centre of the reactor outwards.  First, the 
 differentials are solved with the ODE solver of scipy and considered as an 
 analytical solution. Then a PINN is trained, which should come as close as 
 possible to the analytical solution.
    
-Code written by Alexander Keßler on 11.10.23
+Code written by Alexander Keßler on 25.11.23
 """
 
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import odeint
+from scipy.constants import R
 import math
 import os
 
@@ -24,7 +32,7 @@ torch.set_default_dtype(torch.double)
 plt.style.use(r'thesis.mplstyle')
 
 class generate_data():
-    def __init__(self, inlet_mole_fractions, bound_conds, reactor_conds, n_elements):
+    def __init__(self, inlet_mole_fractions, bound_conds, reactor_conds):
         """Constructor:
         Args:
             inlet_mole_fractions (list): Inlet mole fractions of CH4, H20, H2, 
@@ -32,7 +40,8 @@ class generate_data():
             bound_conds (list): Pressure [bar], flow velocity [m s-1], inlet 
                                 temperature [K], temperature of the steam 
                                 reformer wall [K]
-            reactor_conds (list): efficiency factor of the catalyst [-]
+            reactor_conds (list): efficiency factor of the catalyst [-],
+                                  number of volume elements [-]
             
         Params:
             x_CH4_0 (float): Inlet mole fraction of methane [-]
@@ -48,22 +57,24 @@ class generate_data():
             T_wall (int): temperature of the steam reformer wall [K]
             
             eta (float): efficiency factor of the catalyst [-]
+            n_elements (float): number of volume elements [-]
             
             k0 (1D-array): preexponential factor/ arrhenius parameter [kmol Pa0.5 kgcat-1 h-1]
             E_A (1D-array): activation energy/ arrhenius parameter [J/mol]
             K_ads_0 (1D-array): adsorption constant [Pa-1] for K_ads_0[0:3]
             G_R_0 (1D-array): adsorption enthalpy [J mol-1]
             R (float): gas constant [J K-1 mol-1]
-            A (float): cross section tube [m2]
-            V_dot (float): volumetric flow rate [m^3 h-1]
             d_pi (float): inner catalyst ring diameter [m]
             d_in (float): diameter inner tube [m]
             d_out (float): diameter outer tube [m]
+            A (float): cross section tube [m2]
+            V_dot (float): volumetric flow rate [m^3 h-1]
             em (float): emmissivity for heat transfer [-]
             epsilon (float): void fraction cat.-bet [-]
             lambda_s (float): radial thermal conductivity fixed bed [W m-1 K-1]
             rho_s (float): density of solid material in fixed bed [kg m-3]
             rho_b (float): density fixed bed [kg m-3]
+            
             cp_coef (2D-array): coefficients of the NASA polynomials [j mol-1 K-1]
             H_0 (1D-array): enthalpies of formation [J mol-1]
             S_0 (1D-array): entropy of formation [J mol-1 K-1]
@@ -84,12 +95,13 @@ class generate_data():
         self.T_wall = bound_conds[3]
         
         self.eta = reactor_conds[0]
+        self.n_elements = reactor_conds[1]
         
         self.k0 = np.array([4.225*1e15*math.sqrt(1e5),1.955*1e6*1e-5,1.020*1e15*math.sqrt(1e5)])
         self.E_A = np.array([240.1*1e3,67.13*1e3,243.9*1e3])
         self.K_ads_0 = np.array([8.23*1e-5*1e-5,6.12*1e-9*1e-5,6.65*1e-4*1e-5,1.77*1e5])
         self.G_R_ads = np.array([-70.61*1e3,-82.90*1e3,-38.28*1e3,88.68*1e3])
-        self.R = 8.3145
+        self.R = R
         self.d_pi = 0.0084
         self.d_in = 0.1016
         self.d_out = 0.1322
@@ -112,7 +124,6 @@ class generate_data():
         self.S_0 = np.array([-80.5467, -44.3736, 0,	89.6529, 2.9515])
         self.MW = np.array([16.043, 18.02, 2.016, 28.01, 44.01, 28.01]) * 1e-3
         
-        self.n_elements = n_elements
         
     def calc_inlet_ammount_of_substances(self):
         """
@@ -137,15 +148,15 @@ class generate_data():
         n_CO2_0 = ammount_of_substances[4]
         n_N2_0 = ammount_of_substances[5]
         
-        self.n_0 = np.array([n_CH4_0, n_H2O_0, n_H2_0, n_CO_0, \
-                             n_CO2_0, n_N2_0])
+        return np.array([n_CH4_0, n_H2O_0, n_H2_0, n_CO_0, n_CO2_0, n_N2_0])
            
     def calc_mole_fractions(self, n_vector):
         """
         Calculate the mole fractions of all species.
         
         Args:
-            n_vector (1D-array): Ammount of substances of all species [kmol h-1]
+            n_vector (1D-array): Ammount of substances of all species of the 
+                                 volume elements [kmol h-1]
         """
         
         mole_fractions = np.zeros([6*self.n_elements])
@@ -157,7 +168,22 @@ class generate_data():
         return mole_fractions
     
     def calc_mu_gas(self, T, x_i):
-        #NASA Polynomial in CGS-Unit µP (Poise)
+        """
+        Calculates the dynamic viscosities of the single components mu_i and then
+        calculates the gas mixture dynamic viscosity.
+
+        Args:
+            T (float): temperature of the volume element [K]
+            x_i (1D-array): ammount of substance of all species of the volume 
+                            element [-]
+        
+        New Params:
+            mu_mix (float): gas mixture dynamic viscosity [Pa s]
+        """
+        
+        # PHYSICAL PROPERTIES OF LIQUIDS AND GASES, 
+        # https://booksite.elsevier.com/9780750683661/Appendix_C.pdf
+        # NASA Polynomial in CGS-Unit µP (Poise)
         mu_CH4 = 3.844 + 4.0112*1e-1*T + -1.4303*1e-4*T**2
         mu_H2O = -36.826 + 4.29*1e-1*T + -1.62*1e-5*T**2
         mu_H2 = 27.758 + 2.12*1e-1*T + -3.28*1e-5*T**2
@@ -167,9 +193,10 @@ class generate_data():
         
         mu_gas = np.array([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2]) * 1e-6 # µP -> P
         
-        # Method of Wilke:
-        # Simple and Accurate Method for Calculating Viscosity of Gaseous
-        # Mixtures by Thomas A. Davidson
+        # Method of Wilke: 
+        # Chapter 9.5 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
+        # Simple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
+        # by Thomas A. Davidson
         mu_mix = 0
         phi = np.zeros([len(x_i),len(x_i)])
         for i in range(len(x_i)):
@@ -182,12 +209,30 @@ class generate_data():
         return mu_mix
     
     def calc_area_radii(self, temperature, mole_fractions): 
+        """
+        Calculation of the areas and radii of the volume elements as a function 
+        of temperature. In the radial direction, a pressure gradient is created 
+        by the temperature gradient, which is taken into account using Darcy's law.
+        
+        Args:
+            T (1D-array): temperature of the volume elements [K]
+            x_i (1D-array): ammount of substance of all species of the volume 
+                            elements [-]
+        
+        New Params:
+            mu_gas (float): dynamic viscosity of gas mixture [Pa s]
+            rho_gas (float): density of gas mixture [kg m-3]
+            area_elements (1D-array): area of the volume elements [m]
+            radii_elements (1D-array): radii of the volume elements starting 
+                                       from the centre of the reactor [m]
+        """
+        
         def calc_rho_gas(T, x_i):
             # Calculate density of gas mixture via ideal gas (mixing rule = Dalton)
             rho_gas = np.sum(np.multiply((x_i*self.p*1e5),self.MW))/(self.R * T)
             return rho_gas
         
-        # Calculate area of elements
+        # Calculate area of the volume elements
         mu_gas = np.zeros([self.n_elements,1])
         rho_gas = np.zeros([self.n_elements,1])
         for i in range(self.n_elements):
@@ -198,7 +243,7 @@ class generate_data():
             np.sum(np.divide(mu_gas,rho_gas))
         area_elements = area_elements_devided_by_total_area * self.A
         
-        # Calculate radii of elements
+        # Calculate radii of the volume elements
         radii_elements = np.zeros([self.n_elements+1,1])
         for i in range(self.n_elements):
             radii_elements[i+1] = (area_elements[i]/math.pi + radii_elements[i]**2)**0.5
@@ -206,6 +251,22 @@ class generate_data():
         return (area_elements, radii_elements)
     
     def calc_flow_velocity(self, mole_fractions, area_elements, temperature):
+        """
+        Calculation of the flow velocity as a function of temperature and gas 
+        composition.
+
+        Args:
+            mole_fractions (1D-array): ammount of substance of all species of 
+                                       all volume elements [-]
+            area_elements (1D-array): area of the volume elements [m]
+            temperature (1D-array): temperature of all volume elements [K]
+                                           
+        New Params:
+            molar_mass (float): molecular weight [kg mol-1]
+            flow_velocity_average (float): Flow velocity averaged over all 
+                                           volume elements [m/s]
+        """
+        
         # Calculation of the averaged quantities over the elements
         mole_fractions_average = np.zeros([6,1])
         for i in range(self.n_elements):
@@ -229,6 +290,9 @@ class generate_data():
         The temperature dependence of the heat capacity is considered with NASA 
         polynomials in order to consider the temperature dependence of the 
         enthalpies of formation and the entropies of formation. 
+        
+        Args:
+            T (float): temperature [K]
         
         New Params:
             H_i (1D-array): enthalpies of formation [J mol-1]
@@ -279,10 +343,14 @@ class generate_data():
     def xu_froment(self, temperature, partial_pressures, area_elements):
         """
         Calculation of the differentials from the mass balance with the kinetic 
-        approach of Xu, Froment.
+        approach of Xu, Froment for each volume element.
         
         Args:
-            partial_pressures (1D-array): partial pressures [Pa]
+            temperature (1D-array): temperature of the volume elements [K]
+            partial_pressures (1D-array): partial pressures of all species of 
+                                          the volume elements [Pa]
+            area_elements (1D-array): area of the volume elements [m]
+            
         New Params:
             k (list): velocity constant, k[1,3]=[kmol Pa0.5 kgcat-1 h-1]
                                          k[2]=[kmol Pa-1 kgcat-1 h-1]
@@ -317,7 +385,7 @@ class generate_data():
                         (partial_pressures_element[1]**2) - (((partial_pressures_element[2]**4) * partial_pressures_element[4]) / \
                         Kp[2])) / (DEN**2)
             
-            # Calculate derivatives for the mass balance
+            # Calculate derivatives of the mass balance
             dn_dz_element = np.zeros(6)
             dn_dz_element[0] = self.eta * area_elements[i] * (-r_total_element[0] - r_total_element[2]) * self.rho_b
             dn_dz_element[1] = self.eta * area_elements[i] * (-r_total_element[0] - r_total_element[1] - 2*r_total_element[2]) * self.rho_b
@@ -333,25 +401,47 @@ class generate_data():
     
     def heat_balance(self, mole_fractions, temperature, r_total, flow_velocity, radii_elements):
         """
-        Calculation of the derivatives of the temperature according to the 
-        reactor length.
+        Calculation of the differentials of the heat balance for each volume 
+        element.
 
         Args:
+            mole_fractions (1D-array): ammount of substance of all species of 
+                                       all volume elements [-]
+            temperature (1D-array): temperature of all volume elements [K]
             r_total (1D-array): reaction rates [kmol kgcat-1 h-1]
-            u_gas (float): flow velocity of the gas [m s-1]
+            flow_velocity (float): flow velocity of the gas [m s-1]
+            radii_elements (1D-array): radii of the volume elements [m]
             
         New Params:
-            s_H (1D-array): heat production rate through the reaction [J m-3 h-1]
+            heat_flow_rate (1D-array): heat flow rate through the volume elements
+                                       [kJ m-2 h-1]
+            mult_density_gas_cp (1D-array): product of density_gas and cp_gas [J m-3 K-1]
             density_gas (float): density of the gas [kg m-3]
-            cp (1D-array): heat capacities of the species [J mol-1 K-1]
-            s_H_ext (float): heat exchange rate with environment [J m-3 h-1]
-            dTdz (float): derivatives of the temperature in dependence of the 
-                          reactor length [K m-1]
+            cp_i (1D-array): heat capacities of each component [J mol-1 K-1]
+            alpha_w_int (float): Heat transfer coefficient between fixed bed and 
+                                 wall [kJ m-2 h-1 K-1]
+            lambda_rad (float): Thermal conductivity in the fixed bed 
+                                [kJ m-1 h-1 K-1]
+            cp_gas (float): heat capacity of the gas mixture [J kg-1 K-1]
+            dTdz_cond (1D-array): heat exchange with environment [K m-1]
+            dTdz_react (1D-array): heat production through the reaction [K m-1]
+            dTdz (1D-array): derivatives of the temperature in dependence of the 
+                             reactor length of each volume element [K m-1]
         """
+        
         def calc_lambda_gas(T, x_i):
-            # Calculates the conductivities of the single components lambda_i and then
-            # the gas mixture conductivity.
-            # PHYSICAL PROPERTIES OF LIQUIDS AND GASES
+            """
+            Calculates the conductivities of the single components lambda_i and then
+            the gas mixture conductivity.
+            
+            Args:
+                T (float): temperature of the volume element [K]
+                x_i (1D-array): ammount of substance of all species of the volume 
+                                element [-]
+            """
+            
+            # PHYSICAL PROPERTIES OF LIQUIDS AND GASES, 
+            # https://booksite.elsevier.com/9780750683661/Appendix_C.pdf
             lambda_CH4 = -0.00935 + 1.4028*1e-4*T + 3.318*1e-8*T**2
             lambda_H2O = 0.00053 + 4.7093*1e-5*T + 4.9551*1e-8*T**2
             lambda_H2 = 0.03951 + 4.5918*1e-4*T + -6.4933*1e-8*T**2
@@ -362,10 +452,12 @@ class generate_data():
             lmbd_gas = np.array([lambda_CH4, lambda_H2O, lambda_H2, lambda_CO, lambda_CO2, lambda_N2])
             
             # Method of Wassiljewa:
-            # Simple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
+            # Chapter 10.6 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
+            # Slmple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
             # by Thomas A. Davidson
             # Calculation A(i,j) by Mason, Saxena: Mason EA, Saxena SC. Approximate 
             # formula for the thermal conductivity of gas mixtures. 
+            # Phys Fluids 1958;1:361e9
             lmbd_mix = 0
             A = np.zeros([len(x_i), len(x_i)])
             for i in range(len(x_i)):
@@ -378,6 +470,27 @@ class generate_data():
             return lmbd_mix
                     
         def calc_heat_transfer(T, x_i, rho_g, cp_i, u_gas):
+            """
+            Calculation of the heat transfer in the fixed bed (lmbd_er) and 
+            between the fixed bed and the reactor wall (a_w). It is assumed 
+            that there is no temperature gradient in the reactor wall. 
+            Accordingly, the temperature on the outer reactor wall is 
+            equal to the temperature in the inner reactor wall.
+
+            Args:
+                T (float): temperature of the volume element [K]
+                x_i (1D-array): ammount of substance of all species of the volume 
+                                element [-]
+                rho_g (float): density of the gas mixture [kg m-3]
+                cp_i (1D-array): heat capacities of each species [J mol-1 K-1]
+                u_gas (float): flow velocity of the gas mixture [m s-1]
+            
+            New Params:
+                a_w: Heat transfer coefficient between fixed bed and wall 
+                     [kJ m-2 h-1 K-1]
+                lmbd_er: Thermal conductivity in the fixed bed [kJ m-1 h-1 K-1]
+            """
+            
             mu_g = self.calc_mu_gas(T, x_i)
             lmbd_g = calc_lambda_gas(T, x_i)
             cps_g_mix = np.dot(x_i, (cp_i * (1/self.MW)))
@@ -445,8 +558,20 @@ class generate_data():
         Calculate the 
         
         Args:
-            n_matrix (2D-array): Ammount of substances of all species depending 
-                                 of the reactor length [kmol h-1]
+            y (2D-array): Analytical solution of the reactor model containing the 
+                          ammount of substances [kmol h-1] and temperatures [K] 
+                          of each element as a function of the reactor length.
+        
+        New Params:
+            X_CH4 (1D-array): Conversion of methane averaged over all volume 
+                              elements as a function of reactor length [-]
+            Y_CO2 (1D-array): Yield of carbon dioxide averaged over all volume 
+                              elements as a function of reactor length [-]
+            T_avg (1D-array): Reactor temperature averaged over all volume 
+                              elements as a function of reactor length [K]
+            radii_2D (2D-array): Radii of the volume elements as a function of 
+                                 the reactor length to create the 2D plot of the 
+                                 reactor temperature [m]
         """
         
         # Calculate mole fractions
@@ -480,15 +605,23 @@ class generate_data():
         """
         Function for the ODE solver.
 
-        New Params:
-            ammount_of_substances: ammount of substances of all species [kmol h-1]
-            u_gas (float): flow velocity of the gas [m s-1]
-            partial_pressures (1D-array): partial pressures [Pa]
+        Params:
+            ammount_of_substances (1D-array): ammount of substances of all species 
+                                              of all volume elements [kmol h-1]
+            temperature (1D-array): reactor temperature of all volume elements [K]
+            mole_fractions (1D-array): mole fractions of all species of all volume
+                                       elements [-]
+            partial_pressures (1D-array): partial pressures of all species of all
+                                          volume elements [Pa]
+            area_elements (1D-array): area of the volume elements [m]
+            radii_elements (1D-array): radii of the volume elements starting 
+                                       from the centre of the reactor [m]
+            flow_velocity (float): flow velocity of the gas [m s-1]
         """
         
         # Extract the values
         ammount_of_substances = np.array(y[:6*self.n_elements])
-        temperature = y[6*n_elements:7*n_elements]
+        temperature = y[6*self.n_elements:7*self.n_elements]
         
         # Calculate mole fractions
         mole_fractions = generate_data.calc_mole_fractions(self,ammount_of_substances)
@@ -522,20 +655,22 @@ class generate_data():
         
         Args:
             reactor_lengths (1D-array): reactor lengths for the ODE-Solver [m]
-            plot (bool): plotting the results
+            plot (bool): boolean indicates whether the results should be plotted
+            
         Params:
-            y (2D-array): ammount of substances [kmol h-1], temperature [K]
+            y (2D-array): Analytical solution of the reactor model containing the 
+                          ammount of substances [kmol h-1] and temperatures [K] 
+                          of each element as a function of the reactor length.
         """
         
         # Calculate inlet ammount of substances
-        generate_data.calc_inlet_ammount_of_substances(self)
+        ammount_of_substance_inlet = generate_data.calc_inlet_ammount_of_substances(self)
         
         # Prepare initial conditions
         y_0 = np.zeros([7*self.n_elements])
-        
         for i in range(6):
-            y_0[i*self.n_elements:(i+1)*n_elements] = self.n_0[i]/self.n_elements
-        y_0[6*n_elements:7*n_elements] = self.T0
+            y_0[i*self.n_elements:(i+1)*self.n_elements] = ammount_of_substance_inlet[i]/self.n_elements
+        y_0[6*self.n_elements:7*self.n_elements] = self.T0
         
         # Solve ODE for isotherm, adiabatic or polytrop reactor
         y = odeint(generate_data.ODEs, y_0, reactor_lengths, args=(self,))
@@ -551,30 +686,33 @@ class generate_data():
     
     def plot(self, reactor_lengths, T_2D):
         """
-        Plotting results from the ODE-Solver.
+        Plotting results from the ODE-Solver. The first plot contains the mole 
+        fraction, temperature, conversion of CH4 and yield of CO2 as a function 
+        of reactor length. The second plot shows the cross-section of the reactor 
+        in which the temperatures are plotted. 
         """
         
-        fig = plt.figure(figsize=(10,7))
-        # Mole fractions plot
-        ax1 = fig.add_subplot(221)
+        ## Mole fractions plot
+        fig1 = plt.figure(figsize=(10,7))
+        ax1 = fig1.add_subplot(311)
         ax1.plot(reactor_lengths, self.x_CH4, '-', label=r'$x_{\rm{CH_{4}}}$')
         ax1.plot(reactor_lengths, self.x_H2O, '-', label=r'$x_{\rm{H_{2}O}}$')
         ax1.plot(reactor_lengths, self.x_H2, '-', label=r'$x_{\rm{H_{2}}}$')
         ax1.plot(reactor_lengths, self.x_CO, '-', label=r'$x_{\rm{CO}}$')
         ax1.plot(reactor_lengths, self.x_CO2, '-', label=r'$x_{\rm{CO_{2}}}$')
-        ax1.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
+        #ax1.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
         ax1.set_ylabel(r'$\rm{mole}\:\:\rm{fraction}$')
         ax1.set_ylim(0,0.8)
         ax1.set_xlim(reactor_lengths[0],reactor_lengths[-1])
-        ax1.legend(loc='center right')
+        ax1.legend(loc='upper right', ncol=5)
         
         ax1.tick_params(labelbottom=True, labeltop=False, labelleft=True, labelright=False,
                         bottom=True, top=True, left=True, right=True, direction='in')
         
-        # Temperature plot
-        ax2 = fig.add_subplot(222)
+        ## Temperature plot
+        ax2 = fig1.add_subplot(312, sharex = ax1)
         ax2.plot(reactor_lengths, self.T_avg, 'r-', label='temperature')
-        ax2.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
+        #ax2.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
         ax2.set_ylabel(r'$\rm{temperature}\:/\:\rm{K}$')
         ax2.set_xlim(reactor_lengths[0],reactor_lengths[-1])
         
@@ -583,42 +721,56 @@ class generate_data():
         
         plt.tight_layout()
         
-        fig = plt.figure(figsize=(10,7))
-        # 2D temperature plot
-        ax3 = fig.add_subplot(111, projection='3d')
+        ## Conversion and yield plot
+        ax3 = fig1.add_subplot(313, sharex = ax2)
+        ax3.plot(reactor_lengths, self.X_CH4, 'r-', label=r'$X_{\rm{CH}_{4}}$')
+        ax3.plot(reactor_lengths, self.Y_CO2, 'b-', label=r'$Y_{\rm{CO}_{2}}$')
+        ax3.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
+        ax3.set_ylabel(r'$\rm{conversion},\:\rm{yield}$')
+        ax3.set_xlim(reactor_lengths[0],reactor_lengths[-1])
+        ax3.legend(loc='center right')
+        
+        ax3.tick_params(labelbottom=True, labeltop=False, labelleft=True, labelright=False,
+                        bottom=True, top=True, left=True, right=True, direction='in')
+        
+        plt.tight_layout()
+        
+        ## 2D temperature plot
+        fig2 = plt.figure(figsize=(10,7))
+        ax4 = fig2.add_subplot(111, projection='3d')
         T_2D = T_2D.transpose()
         T_2D = np.concatenate((np.flip(T_2D, axis=0),T_2D[0,:].reshape((1, 100)),T_2D), axis=0)
         radii_2D = self.radii_2D
         radii_2D = np.concatenate((np.flip(radii_2D, axis=0),-1*radii_2D[1:,:]), axis=0)
         
-        surf = ax3.plot_surface(reactor_lengths, radii_2D*1e3, T_2D, cmap='viridis', edgecolors='k', linewidth=0.5, antialiased=True)
-        ax3.view_init(elev=90, azim=-90)
+        surf = ax4.plot_surface(reactor_lengths, radii_2D*1e3, T_2D, cmap='viridis', edgecolors='k', linewidth=0.5, antialiased=True)
+        ax4.view_init(elev=90, azim=-90)
         
-        ax3.set_xlim(reactor_lengths[0],reactor_lengths[-1])
-        ax3.set_zticks([])
+        ax4.set_xlim(reactor_lengths[0],reactor_lengths[-1])
+        ax4.set_zticks([])
         
-        cbar = fig.colorbar(surf, shrink=0.7)
+        cbar = fig2.colorbar(surf, shrink=0.7)
         cbar.ax.set_ylabel(r'$\rm{temperature}\:/\:\rm{K}$')
         
-        ax3.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
-        ax3.set_ylabel(r'$\rm{radius}\:/\:10^{-3}\rm{m}$')
+        ax4.set_xlabel(r'$\rm{reactor}\:\rm{length}\:/\:\rm{m}$')
+        ax4.set_ylabel(r'$\rm{radius}\:/\:10^{-3}\rm{m}$')
         
         plt.title('Temperature profile 2D reactor')
         
         # Make panes transparent
-        ax3.xaxis.pane.fill = False
-        ax3.yaxis.pane.fill = False
-        ax3.zaxis.pane.fill = False
+        ax4.xaxis.pane.fill = False
+        ax4.yaxis.pane.fill = False
+        ax4.zaxis.pane.fill = False
         
         # Remove grid lines
-        ax3.grid(False)
+        ax4.grid(False)
         
         # Transparent spines
-        ax3.zaxis.line.set_color((1.0, 1.0, 1.0, 0.0))
+        ax4.zaxis.line.set_color((1.0, 1.0, 1.0, 0.0))
         
         # Transparent panes
-        ax3.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
-        ax3.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax4.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax4.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
         
         plt.tight_layout()
 
@@ -1300,8 +1452,7 @@ if __name__ == "__main__":
     reactor_lengths = np.linspace(0,12,num=100)
     inlet_mole_fractions = [0.2128,0.714,0.0259,0.0004,0.0119,0.035] #CH4,H20,H2,CO,CO2,N2
     bound_conds = [25.7,2.14,793,1100] #p,u_in,T_in,T_wall
-    reactor_conds = [0.007] #eta
-    n_elements = 10
+    reactor_conds = [0.007, 10] #eta, n_elements
     
     plot_analytical_solution = True #True,False
     """
@@ -1316,7 +1467,7 @@ if __name__ == "__main__":
     """
     
     # Calculation of the analytical curves
-    model = generate_data(inlet_mole_fractions, bound_conds, reactor_conds, n_elements)
+    model = generate_data(inlet_mole_fractions, bound_conds, reactor_conds)
     y = model.solve_ode(reactor_lengths, plot=plot_analytical_solution)
     
     #analytical_solution_x_CH4 = model.x_CH4
