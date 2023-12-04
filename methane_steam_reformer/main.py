@@ -990,7 +990,8 @@ class PINN_loss(torch.nn.Module):
         for i in range(int(len(mole_fractions)/self.n_elements)):
             for j in range(self.n_elements):
                 radii_elements[i,j+1] = (area_elements[i*self.n_elements+j]/math.pi + radii_elements[i,j]**2)**0.5
-            
+        radii_elements = radii_elements.view(-1, 1)
+        
         return (area_elements, radii_elements)
     
     def calc_flow_velocity(self, mole_fractions, area_elements):
@@ -1025,10 +1026,12 @@ class PINN_loss(torch.nn.Module):
         # Calculate averaged flow velocity 
         flow_velocity_average = self.u0 * (temperature_average*molar_mass_0)/ \
             (self.T0*molar_mass_average)
+            
+        flow_velocity_average = flow_velocity_average.repeat(10, 1)
         
         return flow_velocity_average
     
-    def calculate_thermo_properties(self):
+    def calculate_thermo_properties(self, T):
         """
         Calculation of the reaction enthalpies and the equilibrium constants Kp.
         The temperature dependence of the heat capacity is considered with NASA 
@@ -1046,46 +1049,46 @@ class PINN_loss(torch.nn.Module):
         
         # Calculation of the standard formation enthalpy at given temperature
         # with Kirchhoffsches law
-        H_i = torch.unsqueeze(self.H_0, 1).repeat(1, self.T.size(0)) + \
+        H_i = torch.unsqueeze(self.H_0, 1).repeat(1, T.size(0)) + \
                 torch.matmul(self.cp_coef[:5,:], torch.cat([torch.transpose(t, 0, 1) for t in \
-                [self.T, (1/2)*self.T**2, (1/3)*self.T**3, (1/4)*(self.T)**4]], dim=0)) - \
+                [T, (1/2)*T**2, (1/3)*T**3, (1/4)*(T)**4]], dim=0)) - \
                 torch.matmul(self.cp_coef[:5,:], torch.cat([torch.transpose(t, 0, 1) for t in \
-                [torch.full((self.T.size(0), 1), 298.15), (1/2)*torch.full((self.T.size(0), 1), 298.15)**2, \
-                (1/3)*torch.full((self.T.size(0), 1), 298.15)**3, (1/4)*torch.full((self.T.size(0), 1), 298.15)**4]], dim=0))
+                [torch.full((T.size(0), 1), 298.15), (1/2)*torch.full((T.size(0), 1), 298.15)**2, \
+                (1/3)*torch.full((T.size(0), 1), 298.15)**3, (1/4)*torch.full((T.size(0), 1), 298.15)**4]], dim=0))
             
         # Calculation of the standard formation entropy at given temperature
-        S_i = torch.unsqueeze(self.S_0, 1).repeat(1, self.T.size(0)) + \
+        S_i = torch.unsqueeze(self.S_0, 1).repeat(1, T.size(0)) + \
                 torch.matmul(self.cp_coef[:5,:], torch.cat([torch.transpose(t, 0, 1) for t in \
-                [torch.log(self.T), self.T, (1/2)*self.T**2, (1/3)*self.T**3]], dim=0)) - \
+                [torch.log(T), T, (1/2)*T**2, (1/3)*T**3]], dim=0)) - \
                 torch.matmul(self.cp_coef[:5,:], torch.cat([torch.transpose(t, 0, 1) for t in \
-                [torch.log(torch.full((self.T.size(0), 1), 298.15)), torch.full((self.T.size(0), 1), 298.15), \
-                (1/2)*torch.full((self.T.size(0), 1), 298.15)**2, (1/3)*torch.full((self.T.size(0), 1), 298.15)**3]], dim=0))
+                [torch.log(torch.full((T.size(0), 1), 298.15)), torch.full((T.size(0), 1), 298.15), \
+                (1/2)*torch.full((T.size(0), 1), 298.15)**2, (1/3)*torch.full((T.size(0), 1), 298.15)**3]], dim=0))
                 
         # Calculation of standard reaction enthalpies with Satz von Hess at 
         # standard conditions (T = 298.15 K)
-        H_R = torch.zeros(3, 100)
+        H_R = torch.zeros(3, len(T))
         H_R[0,:] = -H_i[0,:] - H_i[1,:] + H_i[3,:] + 3*H_i[2,:]
         H_R[1,:] = -H_i[3,:] - H_i[1,:] + H_i[4,:] + H_i[2,:]
         H_R[2,:] = -H_i[0,:] - 2*H_i[1,:] + H_i[4,:] + 4*H_i[2,:]
         
         # Calculation of standard reaction entropies with Satz von Hess at 
         # standard conditions (T = 298.15 K)
-        S_R = torch.zeros(3, 100)
+        S_R = torch.zeros(3, len(T))
         S_R[0,:] = -S_i[0,:] - S_i[1,:] + S_i[3,:] + 3*S_i[2,:]
         S_R[1,:] = -S_i[3,:] - S_i[1,:] + S_i[4,:] + S_i[2,:]
         S_R[2,:] = -S_i[0,:] - 2*S_i[1,:] + S_i[4,:] + 4*S_i[2,:]
         
         # Calculation of the free reaction enthalpy with the Gibbs Helmoltz equation
-        G_R = H_R - self.T.t() * S_R
+        G_R = H_R - T.t() * S_R
         
         # Calculation of the rate constants
-        Kp = torch.exp(-G_R / (self.R*self.T.t())) * torch.cat((torch.full((1, 100), 1e10), \
-                torch.full((1, 100), 1), torch.full((1, 100), 1e10)), dim=0)
+        Kp = torch.exp(-G_R / (self.R*T.t())) * torch.cat((torch.full((1, len(T)), 1e10), \
+                torch.full((1, len(T)), 1), torch.full((1, len(T)), 1e10)), dim=0)
         
         return [Kp.t(), H_R.t()]
                                                    
 
-    def xu_froment(self, partial_pressures):
+    def xu_froment(self, partial_pressures, area_elements):
         """
         Calculation of the differentials from the mass balance with the kinetic 
         approach of Xu, Froment.
@@ -1102,71 +1105,204 @@ class PINN_loss(torch.nn.Module):
                             species in dependence of the reactor length [kmol m-1 h-1]
         """
         
+        # Calculate derivative of the mass balance of each element
+        dn_dz = torch.zeros([len(partial_pressures),6])
+        r_total = torch.zeros([len(partial_pressures),3])
+        
         # Calculate reaction rates with a Langmuir-Hinshelwood-Houghen-Watson approach
-        k = self.k0.expand(self.T.size(0), -1) * torch.exp(-self.E_A.expand(self.T.size(0), -1)/(self.R*self.T))
-        K_ads = self.K_ads_0.expand(self.T.size(0), -1) * torch.exp(-self.G_R_ads.expand(self.T.size(0), -1)/(self.R*self.T))
-        Kp, H_R = PINN_loss.calculate_thermo_properties(self)
+        k = self.k0 * torch.exp(-self.E_A/(self.R*self.temperature))
+        K_ads = self.K_ads_0 * torch.exp(-self.G_R_ads/(self.R*self.temperature))
+        Kp, H_R = PINN_loss.calculate_thermo_properties(self, self.temperature)
         
         DEN = 1 + partial_pressures[:,3]*K_ads[:,0] + partial_pressures[:,2]*K_ads[:,1] + \
             partial_pressures[:,0]*K_ads[:,2] + (partial_pressures[:,1]*K_ads[:,3]) / partial_pressures[:,2]
-        r_total = torch.zeros(100, 3)
+        r_total = torch.zeros(len(partial_pressures),3)
         r_total[:,0] = (k[:,0] / (partial_pressures[:,2]**2.5)) * (partial_pressures[:,0] * \
-                        partial_pressures[:,1] - (((partial_pressures[:,2]**3) * partial_pressures[:,3]) / \
-                        Kp[:,0])) / (DEN**2)
+                    partial_pressures[:,1] - (((partial_pressures[:,2]**3) * partial_pressures[:,3]) / \
+                    Kp[:,0])) / (DEN**2)
         r_total[:,1] = (k[:,1] / partial_pressures[:,2]) * (partial_pressures[:,3] * \
-                        partial_pressures[:,1] - ((partial_pressures[:,2] * partial_pressures[:,4]) / \
-                        Kp[:,1])) / (DEN**2)
+                    partial_pressures[:,1] - ((partial_pressures[:,2] * partial_pressures[:,4]) / \
+                    Kp[:,1])) / (DEN**2)
         r_total[:,2] = (k[:,2] / (partial_pressures[:,2]**3.5)) * (partial_pressures[:,0] * \
-                        (partial_pressures[:,1]**2) - (((partial_pressures[:,2]**4) * partial_pressures[:,4]) / \
-                        Kp[:,2])) / (DEN**2)
+                    (partial_pressures[:,1]**2) - (((partial_pressures[:,2]**4) * partial_pressures[:,4]) / \
+                    Kp[:,2])) / (DEN**2)
+        r_total = self.eta * r_total
+            
+        # Calculate derivatives of the mass balance
+        dn_dz = torch.zeros([len(partial_pressures),5])
+        dn_dz[:,0] = area_elements.squeeze() * (-r_total[:,0] - r_total[:,2]) * self.rho_b
+        dn_dz[:,1] = area_elements.squeeze() * (-r_total[:,0] - r_total[:,1] - 2*r_total[:,2]) * self.rho_b
+        dn_dz[:,2] = area_elements.squeeze() * (3*r_total[:,0] + r_total[:,1] + 4*r_total[:,2]) * self.rho_b
+        dn_dz[:,3] = area_elements.squeeze() * (r_total[:,0] - r_total[:,1]) * self.rho_b
+        dn_dz[:,4] = area_elements.squeeze() * (r_total[:,1] + r_total[:,2]) * self.rho_b
         
-        # Calculate derivatives for the mass balance
-        dn_dz = torch.zeros(100, 5)
-        dn_dz[:,0] = self.eta * self.A * (-r_total[:,0] - r_total[:,2]) * self.rho_b
-        dn_dz[:,1] = self.eta * self.A * (-r_total[:,0] - r_total[:,1] - 2*r_total[:,2]) * self.rho_b
-        dn_dz[:,2] = self.eta * self.A * (3*r_total[:,0] + r_total[:,1] + 4*r_total[:,2]) * self.rho_b
-        dn_dz[:,3] = self.eta * self.A * (r_total[:,0] - r_total[:,1]) * self.rho_b
-        dn_dz[:,4] = self.eta * self.A * (r_total[:,1] + r_total[:,2]) * self.rho_b
-
         return [dn_dz, r_total]
     
-    def heat_balance(self, r_total, u_gas):
+    def heat_balance(self, mole_fractions, r_total, flow_velocity, radii_elements):
         """
-        Calculation of the derivatives of the temperature according to the 
-        reactor length.
+        Calculation of the differentials of the heat balance for each volume 
+        element.
 
         Args:
-            r_total (tensor): reaction rates [kmol kgcat-1 h-1]
-            u_gas (tensor): flow velocity of the gas [m s-1]
+            mole_fractions (1D-array): ammount of substance of all species of 
+                                       all volume elements [-]
+            temperature (1D-array): temperature of all volume elements [K]
+            r_total (1D-array): reaction rates [kmol kgcat-1 h-1]
+            flow_velocity (float): flow velocity of the gas [m s-1]
+            radii_elements (1D-array): radii of the volume elements [m]
             
         New Params:
-            s_H (tensor): heat production rate through the reaction [J m-3 h-1]
-            density_gas (tensor): density of the gas [kg m-3]
-            cp (tensor): heat capacities of the species [J mol-1 K-1]
-            s_H_ext (tensor): heat exchange rate with environment [J m-3 h-1]
-            dTdz (tensor): derivatives of the temperature in dependence of the 
-                          reactor length [K m-1]
+            heat_flow_rate (1D-array): heat flow rate through the volume elements
+                                       [kJ m-2 h-1]
+            mult_density_gas_cp (1D-array): product of density_gas and cp_gas [J m-3 K-1]
+            density_gas (float): density of the gas [kg m-3]
+            cp_i (1D-array): heat capacities of each component [J mol-1 K-1]
+            alpha_w_int (float): Heat transfer coefficient between fixed bed and 
+                                 wall [kJ m-2 h-1 K-1]
+            lambda_rad (float): Thermal conductivity in the fixed bed 
+                                [kJ m-1 h-1 K-1]
+            cp_gas (float): heat capacity of the gas mixture [J kg-1 K-1]
+            dTdz_cond (1D-array): heat exchange with environment [K m-1]
+            dTdz_react (1D-array): heat production through the reaction [K m-1]
+            dTdz (1D-array): derivatives of the temperature in dependence of the 
+                             reactor length of each volume element [K m-1]
         """
         
-        ## Heat balance
-        # Calculation of the heat production rate through the reaction
-        Kp, H_R = PINN_loss.calculate_thermo_properties(self)
-        s_H = -(H_R * 1e3) * self.eta * r_total * self.rho_b
+        def calc_lambda_gas(T, x_i):
+            """
+            Calculates the conductivities of the single components lambda_i and then
+            the gas mixture conductivity.
+            
+            Args:
+                T (float): temperature of the volume element [K]
+                x_i (1D-array): ammount of substance of all species of the volume 
+                                element [-]
+            """
+            
+            # PHYSICAL PROPERTIES OF LIQUIDS AND GASES, 
+            # https://booksite.elsevier.com/9780750683661/Appendix_C.pdf
+            lambda_CH4 = -0.00935 + 1.4028*1e-4*T + 3.318*1e-8*T**2
+            lambda_H2O = 0.00053 + 4.7093*1e-5*T + 4.9551*1e-8*T**2
+            lambda_H2 = 0.03951 + 4.5918*1e-4*T + -6.4933*1e-8*T**2
+            lambda_CO = 0.00158 + 8.2511*1e-5*T + -1.9081*1e-8*T**2
+            lambda_CO2 = -0.012 + 1.0208*1e-4*T + -2.2403*1e-8*T**2
+            lambda_N2 = 0.00309 + 7.593*1e-5*T + -1.1014*1e-8*T**2
+
+            lmbd_gas = torch.tensor([lambda_CH4, lambda_H2O, lambda_H2, lambda_CO, lambda_CO2, lambda_N2])
+            
+            # Method of Wassiljewa:
+            # Chapter 10.6 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
+            # Slmple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
+            # by Thomas A. Davidson
+            # Calculation A(i,j) by Mason, Saxena: Mason EA, Saxena SC. Approximate 
+            # formula for the thermal conductivity of gas mixtures. 
+            # Phys Fluids 1958;1:361e9
+            lmbd_mix = 0
+            A = torch.zeros([len(x_i), len(x_i)])
+            for i in range(len(x_i)):
+                for j in range(len(x_i)):
+                    A[i,j] = (1 + (lmbd_gas[i]/lmbd_gas[j])**(0.5) * (self.MW[i]/self.MW[j])**(0.25))**2/ \
+                        (8*(1 + (self.MW[i]/self.MW[j]) ))**(0.5)
+                     
+                lmbd_mix = lmbd_mix + x_i[i]*lmbd_gas[i]/torch.dot(A[i,:], x_i)
+            
+            return lmbd_mix
+                    
+        def calc_heat_transfer(T, x_i, rho_g, cp_i, u_gas):
+            """
+            Calculation of the heat transfer in the fixed bed (lmbd_er) and 
+            between the fixed bed and the reactor wall (a_w). It is assumed 
+            that there is no temperature gradient in the reactor wall. 
+            Accordingly, the temperature on the outer reactor wall is 
+            equal to the temperature in the inner reactor wall.
+
+            Args:
+                T (float): temperature of the volume element [K]
+                x_i (1D-array): ammount of substance of all species of the volume 
+                                element [-]
+                rho_g (float): density of the gas mixture [kg m-3]
+                cp_i (1D-array): heat capacities of each species [J mol-1 K-1]
+                u_gas (float): flow velocity of the gas mixture [m s-1]
+            
+            New Params:
+                a_w: Heat transfer coefficient between fixed bed and wall 
+                     [kJ m-2 h-1 K-1]
+                lmbd_er: Thermal conductivity in the fixed bed [kJ m-1 h-1 K-1]
+            """
+            
+            mu_g = self.calc_mu_gas(T, x_i)
+            lmbd_g = calc_lambda_gas(T, x_i)
+            cps_g_mix = torch.dot(x_i, (cp_i * (1/self.MW)))
+            l_c = self.d_pi
+            N_Re = rho_g * u_gas * l_c / mu_g
+            N_Pr = cps_g_mix * mu_g / lmbd_g;
+
+            a_w = (1 - 1.5 * (self.d_in/self.d_pi)**(-1.5)) * \
+                   (lmbd_g * 3.6)/self.d_pi * N_Re**(0.59) * N_Pr**(1/3);
+            a_rs = 0.8171*(self.em/(2-self.em))*(T/100)**(3);
+            a_ru = (0.8171*(T/100)**(3))/(1+self.epsilon/2 * (1-self.epsilon) * \
+                    (1-self.em)/self.em);
+
+            lmbd_er_0 = self.epsilon*(lmbd_g*3.6 + 0.95*a_ru*self.d_pi) + \
+                        (0.95 * (1 - self.epsilon))/(2/(3*self.lambda_s*3.6) + \
+                        1/(10 * lmbd_g*3.6 + a_rs * self.d_pi))
+            
+            lmbd_er = lmbd_er_0 + 0.111 * lmbd_g*3.6 * (N_Re * N_Pr**(1/3))/(1 + 46 * \
+                      (self.d_pi/self.d_out)**(2))
+            
+            return (a_w, lmbd_er)
+
+        # Calculate quantities for heat transfer
+        density_gas = torch.sum(self.p * 1e5 * mole_fractions * self.MW, dim=1, keepdim=True) / \
+                            (self.R * self.temperature)
+        cp_i = self.cp_coef[:,0] + self.cp_coef[:,1] * self.temperature + self.cp_coef[:,2] * \
+            self.temperature**2 + self.cp_coef[:,3] * self.temperature**3
+        cp_gas = torch.mul(mole_fractions, cp_i/self.MW).sum(dim=1, keepdim=True)
+        mult_density_gas_cp = cp_gas*density_gas*1e3
         
-        # Calculation of the heat exchange rate with environment
-        s_H_ext = -self.U_perV * 1e3 * (self.T - self.T_wall)
+        # Calculate heat transfer
+        alpha_w_int = torch.zeros([1000,1])
+        lambda_rad = torch.zeros([1000,1])
+        for i in range(len(mole_fractions)):
+            alpha_w_int[i], lambda_rad[i] = calc_heat_transfer(self.temperature[i],\
+                mole_fractions[i], density_gas[i], cp_i[i], flow_velocity[i])
         
-        # Calculate derivative for the heat balance
-        density_gas = torch.sum(self.p * 1e5 * self.mole_fractions * \
-            self.MW.unsqueeze(0).expand(100, -1), dim=1).unsqueeze(1) / (self.R * self.T)
-        cp = self.cp_coef[:,0].unsqueeze(0).expand(100, -1) + \
-            self.cp_coef[:,1].unsqueeze(0).expand(100, -1) * self.T + \
-            self.cp_coef[:,2].unsqueeze(0).expand(100, -1) * self.T**2 + \
-            self.cp_coef[:,3].unsqueeze(0).expand(100, -1) * self.T**3
-        dT_dz = (torch.sum(s_H,dim=1)+s_H_ext.squeeze()) / (u_gas.squeeze() * 3.6 * \
-            torch.sum(self.mole_fractions*(cp/self.MW),dim=1) * density_gas.squeeze(1) * 1e3)
+        alpha_w_int = alpha_w_int.view(int(len(alpha_w_int)/10), self.n_elements).t()
+        lambda_rad = lambda_rad.view(int(len(lambda_rad)/10), self.n_elements).t()
+        temperature = self.temperature.view(int(len(self.temperature)/10), self.n_elements).t()
+        radii_elements = radii_elements.view(int(len(self.temperature)/10), self.n_elements+1).t()
         
-        return dT_dz
+        heat_flow_rate = torch.zeros([self.n_elements+1, int(len(self.temperature)/10)])
+        for i in range(self.n_elements):   
+            if i == 0:
+                # first boundary condition
+                heat_flow_rate[i,:] = 0
+            elif i == self.n_elements-1:
+                heat_flow_rate[i,:] = lambda_rad[i,:]*(temperature[i-1,:]-temperature[i,:])/(radii_elements[i+1,:]-radii_elements[i,:])
+                # second boundary condition
+                heat_flow_rate[i+1,:] = (alpha_w_int[i,:]*lambda_rad[i,:]/(0.5*(radii_elements[i+1,:]-radii_elements[i,:])))/ \
+                    (alpha_w_int[i,:]+(lambda_rad[i,:]/(0.5*(radii_elements[i+1,:]-radii_elements[i,:]))))* (temperature[-1,:]-self.T_wall)
+            else:
+        	    heat_flow_rate[i,:] = lambda_rad[i,:]*(temperature[i-1,:]-temperature[i,:])/(radii_elements[i+1,:]-radii_elements[i,:])
+
+        # Calculate derivative of the heat balance
+        Kp, H_R = self.calculate_thermo_properties(self.temperature)
+        s_H = -torch.sum((H_R*1e3)*(r_total)*self.rho_b, dim=1, keepdim=True)
+        s_H = s_H.view(int(len(s_H)/10), self.n_elements).t()
+        flow_velocity = flow_velocity.view(int(len(flow_velocity)/10), self.n_elements).t()
+        
+        dTdz = torch.zeros([self.n_elements, int(len(self.temperature)/10)])
+        for i in range(self.n_elements):
+            dr = radii_elements[i+1,:]-radii_elements[i,:]
+            # Calculation of the source term for external heat exchange
+            dTdz_cond = (radii_elements[i,:]*heat_flow_rate[i,:]*1e3 - radii_elements[i+1,:]*heat_flow_rate[i+1,:]*1e3)/ \
+                (dr *(radii_elements[i,:]+dr*0.5)*mult_density_gas_cp[i,:]*flow_velocity[i,:]*3.600)
+            # Calculation of the source term for the reaction
+            dTdz_react = s_H[i,:]/(mult_density_gas_cp[i,:]*flow_velocity[i,:]*3.600)
+            dTdz[i,:] = dTdz_cond+dTdz_react           
+        
+        dTdz = torch.reshape(dTdz.t(), (1000, 1))
+        return dTdz
     
     def calc_IC_loss(self, y_pred, x):
         """
@@ -1224,7 +1360,7 @@ class PINN_loss(torch.nn.Module):
         mole_fractions = torch.cat([y_pred[:,:5], (self.n_N2_0/self.n_elements)*torch.ones(len(y_pred), 1)], dim=1)/ \
             torch.sum(torch.cat([y_pred[:,:5], (self.n_N2_0/self.n_elements)*torch.ones(len(y_pred), 1)], dim=1), dim=1).view(-1, 1)
         
-        #Diesen Bereich später löschen!!!!!!!!!
+        #!!!!!!!!Diesen Bereich später löschen!!!!!!!!
         mole_fractions[:,0] = 0.2128
         mole_fractions[:,1] = 0.714
         mole_fractions[:,2] = 0.0259
@@ -1244,11 +1380,13 @@ class PINN_loss(torch.nn.Module):
         flow_velocity = PINN_loss.calc_flow_velocity(self, mole_fractions, area_elements)
         
         # Calculate the differentials from the mass balance
-        !!! -> Hier geht es weiter mit der GE
-        dn_dz_pred, r_total_pred = PINN_loss.xu_froment(self, partial_pressures)
+        dn_dz_pred, r_total_pred = PINN_loss.xu_froment(self, partial_pressures, area_elements)
         
         # Calculate the differential from the heat balance
-        dT_dz_pred = PINN_loss.heat_balance(self, r_total_pred, flow_velocity)
+        dT_dz_pred = PINN_loss.heat_balance(self, mole_fractions, r_total_pred, flow_velocity, radii_elements)
+        
+        # Bis hier fertig
+        !!! -> unten geht es weiter mit GE
         
         ## Calculation of the mean square displacement between the gradients of 
         ## autograd and differentials of the mass/ heat balance
