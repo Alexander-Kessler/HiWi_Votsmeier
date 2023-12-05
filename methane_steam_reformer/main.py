@@ -1188,7 +1188,7 @@ class PINN_loss(torch.nn.Module):
             lambda_CO2 = -0.012 + 1.0208*1e-4*T + -2.2403*1e-8*T**2
             lambda_N2 = 0.00309 + 7.593*1e-5*T + -1.1014*1e-8*T**2
 
-            lmbd_gas = torch.tensor([lambda_CH4, lambda_H2O, lambda_H2, lambda_CO, lambda_CO2, lambda_N2])
+            lmbd_gas = torch.cat((lambda_CH4, lambda_H2O, lambda_H2, lambda_CO, lambda_CO2, lambda_N2))
             
             # Method of Wassiljewa:
             # Chapter 10.6 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
@@ -1197,16 +1197,18 @@ class PINN_loss(torch.nn.Module):
             # Calculation A(i,j) by Mason, Saxena: Mason EA, Saxena SC. Approximate 
             # formula for the thermal conductivity of gas mixtures. 
             # Phys Fluids 1958;1:361e9
-            lmbd_mix = 0
+            lmbd_mix = torch.zeros([len(x_i)])
             A = torch.zeros([len(x_i), len(x_i)])
             for i in range(len(x_i)):
                 for j in range(len(x_i)):
                     A[i,j] = (1 + (lmbd_gas[i]/lmbd_gas[j])**(0.5) * (self.MW[i]/self.MW[j])**(0.25))**2/ \
                         (8*(1 + (self.MW[i]/self.MW[j]) ))**(0.5)
-                     
-                lmbd_mix = lmbd_mix + x_i[i]*lmbd_gas[i]/torch.dot(A[i,:], x_i)
             
-            return lmbd_mix
+                lmbd_mix[i] = x_i[i]*lmbd_gas[i]/torch.dot(A[i,:], x_i)
+            
+            lmbd_mix_sum = torch.sum(lmbd_mix)
+            
+            return lmbd_mix_sum
                     
         def calc_heat_transfer(T, x_i, rho_g, cp_i, u_gas):
             """
@@ -1360,6 +1362,7 @@ class PINN_loss(torch.nn.Module):
         mole_fractions = torch.cat([y_pred[:,:5], (self.n_N2_0/self.n_elements)*torch.ones(len(y_pred), 1)], dim=1)/ \
             torch.sum(torch.cat([y_pred[:,:5], (self.n_N2_0/self.n_elements)*torch.ones(len(y_pred), 1)], dim=1), dim=1).view(-1, 1)
         
+        """
         #!!!!!!!!Diesen Bereich später löschen!!!!!!!!
         mole_fractions[:,0] = 0.2128
         mole_fractions[:,1] = 0.714
@@ -1369,6 +1372,7 @@ class PINN_loss(torch.nn.Module):
         mole_fractions[:,5] = 0.035
         self.temperature[:] = 793
         #!!!!!!!!
+        """
         
         # Calculate partial pressures
         partial_pressures = self.p * 1e5 * mole_fractions
@@ -1385,9 +1389,6 @@ class PINN_loss(torch.nn.Module):
         # Calculate the differential from the heat balance
         dT_dz_pred = PINN_loss.heat_balance(self, mole_fractions, r_total_pred, flow_velocity, radii_elements)
         
-        # Bis hier fertig
-        !!! -> unten geht es weiter mit GE
-        
         ## Calculation of the mean square displacement between the gradients of 
         ## autograd and differentials of the mass/ heat balance
         loss_GE_CH4 = (dn_dz_CH4 - dn_dz_pred[:,0].unsqueeze(1))**2
@@ -1395,7 +1396,7 @@ class PINN_loss(torch.nn.Module):
         loss_GE_H2 = (dn_dz_H2 - dn_dz_pred[:,2].unsqueeze(1))**2
         loss_GE_CO = (dn_dz_CO - dn_dz_pred[:,3].unsqueeze(1))**2
         loss_GE_CO2 = (dn_dz_CO2 - dn_dz_pred[:,4].unsqueeze(1))**2
-        loss_GE_T = (dT_dz - dT_dz_pred.unsqueeze(1))**2
+        loss_GE_T = (dT_dz - dT_dz_pred)**2
         
         return [loss_GE_CH4, loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, loss_GE_T]
     
@@ -1773,7 +1774,7 @@ if __name__ == "__main__":
     np.save("python_Y_CO2",analytical_solution_Y_CO2)
     np.save("python_T_avg",analytical_solution_T_avg)
     """
-    
+    torch.autograd.set_detect_anomaly(False)
     # Set up the neural network
     network = NeuralNetwork(input_size_NN=input_size_NN, hidden_size_NN=hidden_size_NN,\
                             output_size_NN=output_size_NN, num_layers_NN=num_layers_NN,\
