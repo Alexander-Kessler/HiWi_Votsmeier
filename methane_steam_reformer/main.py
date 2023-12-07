@@ -932,7 +932,7 @@ class PINN_loss(torch.nn.Module):
         mu_CO2 = 11.811 + 4.9838*1e-1*T + -1.0851*1e-4*T**2
         mu_N2 = 42.606 + 4.75*1e-1*T + -9.88*1e-5*T**2
         
-        mu_gas = torch.tensor([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2]) * 1e-6 # µP -> P
+        mu_gas = torch.cat([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2]) * 1e-6 # µP -> P
         
         # Method of Wilke: 
         # Chapter 9.5 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
@@ -989,7 +989,8 @@ class PINN_loss(torch.nn.Module):
         radii_elements = torch.zeros([int(len(mole_fractions)/self.n_elements),self.n_elements+1])
         for i in range(int(len(mole_fractions)/self.n_elements)):
             for j in range(self.n_elements):
-                radii_elements[i,j+1] = (area_elements[i*self.n_elements+j]/math.pi + radii_elements[i,j]**2)**0.5
+                new_radius = (area_elements[i * self.n_elements + j] / math.pi + radii_elements[i, j] ** 2) ** 0.5
+                radii_elements[i] = torch.cat((radii_elements[i, :j + 1], torch.tensor([new_radius]), radii_elements[i, j + 2:]))
         radii_elements = radii_elements.view(-1, 1)
         
         return (area_elements, radii_elements)
@@ -1738,9 +1739,9 @@ if __name__ == "__main__":
     plot_analytical_solution = True #True,False
     
     input_size_NN = 1
-    hidden_size_NN = 32
+    hidden_size_NN = 3
     output_size_NN = 6
-    num_layers_NN = 3
+    num_layers_NN = 1
     num_epochs = 100
     weight_factors = [1e1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
     epsilon = 0 #epsilon=0: old model, epsilon!=0: new model
