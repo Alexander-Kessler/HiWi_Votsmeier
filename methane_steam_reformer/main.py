@@ -908,15 +908,15 @@ class PINN_loss(torch.nn.Module):
         self.n_CO_0 = ammount_of_substances[3]
         self.n_CO2_0 = ammount_of_substances[4]
         self.n_N2_0 = ammount_of_substances[5]
-        
-    def calc_mu_gas(self, T, x_i):
+    
+    def calc_mu_gas(self, T, x):
         """
         Calculates the dynamic viscosities of the single components mu_i and then
         calculates the gas mixture dynamic viscosity.
 
         Args:
             T (float): temperature of the volume element [K]
-            x_i (1D-array): ammount of substance of all species of the volume 
+            x (1D-array): ammount of substance of all species of the volume 
                             element [-]
         
         New Params:
@@ -933,20 +933,21 @@ class PINN_loss(torch.nn.Module):
         mu_CO2 = 11.811 + 4.9838*1e-1*T + -1.0851*1e-4*T**2
         mu_N2 = 42.606 + 4.75*1e-1*T + -9.88*1e-5*T**2
         
-        mu_gas = torch.cat([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2]) * 1e-6 # µP -> P
+        mu_gas = torch.cat([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2],dim=1) * 1e-6 # µP -> P
         
         # Method of Wilke: 
         # Chapter 9.5 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
         # Simple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
         # by Thomas A. Davidson
-        mu_mix = torch.zeros([len(x_i)])
-        for i in range(len(x_i)):
-            phi_row = (1 + (mu_gas[i] / mu_gas) ** (0.5) * (self.MW / self.MW[i]) ** (0.25)) ** 2 / \
+        num_components = 6
+        mu_mix = torch.zeros([len(x),num_components])
+        for i in range(num_components):
+            phi_row = (1 + (mu_gas[:,i].view(-1, 1) / mu_gas) ** (0.5) * (self.MW / self.MW[i]) ** (0.25)) ** 2 / \
                       (8 * (1 + (self.MW[i] / self.MW))) ** (0.5)
 
-            mu_mix[i] = x_i[i]*mu_gas[i]/(torch.dot(phi_row,x_i))
+            mu_mix[:,i] = x[:,i]*mu_gas[:,i]/(torch.sum(phi_row * x, dim=1))
             
-        mu_mix_sum = torch.sum(mu_mix) * 0.1 # Convert CGS-Unit Poise to SI-Unit Pa*s 
+        mu_mix_sum = torch.sum(mu_mix,dim=1).view(-1, 1) * 0.1 # Convert CGS-Unit Poise to SI-Unit Pa*s 
         
         return mu_mix_sum
     
@@ -969,17 +970,9 @@ class PINN_loss(torch.nn.Module):
                                        from the centre of the reactor [m]
         """
         
-        def calc_rho_gas(T, x_i):
-            # Calculate density of gas mixture via ideal gas (mixing rule = Dalton)
-            rho_gas = torch.sum(torch.mul((x_i*self.p*1e5),self.MW))/(self.R * T)
-            return rho_gas
-
         # Calculate area of the volume elements
-        mu_gas = torch.zeros([len(mole_fractions),1])
-        rho_gas = torch.zeros([len(mole_fractions),1])
-        for i in range(len(mole_fractions)):
-            mu_gas[i] = self.calc_mu_gas(self.temperature[i], mole_fractions[i,:])
-            rho_gas[i] = calc_rho_gas(self.temperature[i], mole_fractions[i,:])
+        mu_gas = self.calc_mu_gas(self.temperature, mole_fractions)
+        rho_gas = torch.sum(torch.mul((mole_fractions*self.p*1e5),self.MW),dim=1).view(-1, 1)/(self.R * self.temperature)
         
         area_elements_devided_by_total_area = torch.div(mu_gas,rho_gas)/\
             torch.div(mu_gas,rho_gas).view(-1, self.n_elements).sum(dim=1).repeat(\
@@ -1170,6 +1163,47 @@ class PINN_loss(torch.nn.Module):
                              reactor length of each volume element [K m-1]
         """
         
+        def calc_mu_gas_old(T, x_i):
+            """
+            Calculates the dynamic viscosities of the single components mu_i and then
+            calculates the gas mixture dynamic viscosity.
+    
+            Args:
+                T (float): temperature of the volume element [K]
+                x_i (1D-array): ammount of substance of all species of the volume 
+                                element [-]
+            
+            New Params:
+                mu_mix (float): gas mixture dynamic viscosity [Pa s]
+            """
+            
+            # PHYSICAL PROPERTIES OF LIQUIDS AND GASES, 
+            # https://booksite.elsevier.com/9780750683661/Appendix_C.pdf
+            # NASA Polynomial in CGS-Unit µP (Poise)
+            mu_CH4 = 3.844 + 4.0112*1e-1*T + -1.4303*1e-4*T**2
+            mu_H2O = -36.826 + 4.29*1e-1*T + -1.62*1e-5*T**2
+            mu_H2 = 27.758 + 2.12*1e-1*T + -3.28*1e-5*T**2
+            mu_CO = 23.811 + 5.3944*1e-1*T + -1.5411*1e-4*T**2
+            mu_CO2 = 11.811 + 4.9838*1e-1*T + -1.0851*1e-4*T**2
+            mu_N2 = 42.606 + 4.75*1e-1*T + -9.88*1e-5*T**2
+            
+            mu_gas = torch.cat([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2]) * 1e-6 # µP -> P
+            
+            # Method of Wilke: 
+            # Chapter 9.5 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
+            # Simple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
+            # by Thomas A. Davidson
+            mu_mix = torch.zeros([len(x_i)])
+            for i in range(len(x_i)):
+                phi_row = (1 + (mu_gas[i] / mu_gas) ** (0.5) * (self.MW / self.MW[i]) ** (0.25)) ** 2 / \
+                          (8 * (1 + (self.MW[i] / self.MW))) ** (0.5)
+    
+                mu_mix[i] = x_i[i]*mu_gas[i]/(torch.dot(phi_row,x_i))
+                
+            mu_mix_sum = torch.sum(mu_mix) * 0.1 # Convert CGS-Unit Poise to SI-Unit Pa*s 
+            
+            return mu_mix_sum
+        
         def calc_lambda_gas(T, x_i):
             """
             Calculates the conductivities of the single components lambda_i and then
@@ -1231,7 +1265,7 @@ class PINN_loss(torch.nn.Module):
                 lmbd_er: Thermal conductivity in the fixed bed [kJ m-1 h-1 K-1]
             """
             
-            mu_g = self.calc_mu_gas(T, x_i)
+            mu_g = calc_mu_gas_old(T, x_i)
             lmbd_g = calc_lambda_gas(T, x_i)
             cps_g_mix = torch.dot(x_i, (cp_i * (1/self.MW)))
             l_c = self.d_pi
