@@ -24,6 +24,7 @@ from scipy.integrate import odeint
 from scipy.constants import R
 import math
 import os
+import time
 
 # set default tensor
 torch.set_default_dtype(torch.double)
@@ -847,7 +848,7 @@ class PINN_loss(torch.nn.Module):
         # New parameter
         self.w_n, self.w_T, self.w_GE_n, self.w_GE_T, self.w_IC_n, \
             self.w_IC_T = weight_factors
-        self.epsilon = torch.tensor(epsilon)
+        self.causality_parameter = torch.tensor(epsilon)
         
         # Parameter known from the class generate_data()
         self.inlet_mole_fractions = torch.tensor(inlet_mole_fractions[0:6])
@@ -938,16 +939,16 @@ class PINN_loss(torch.nn.Module):
         # Chapter 9.5 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
         # Simple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
         # by Thomas A. Davidson
-        mu_mix = 0
-        phi = torch.zeros([len(x_i),len(x_i)])
+        mu_mix = torch.zeros([len(x_i)])
         for i in range(len(x_i)):
-            for j in range(len(x_i)):
-                phi[i,j] = (1 + (mu_gas[i]/mu_gas[j])**(0.5) * (self.MW[j]/self.MW[i])**(0.25))**2/ \
-                    (8*(1 + (self.MW[i]/self.MW[j]) ))**(0.5)
-            mu_mix = mu_mix + x_i[i]*mu_gas[i]/(torch.dot(phi[i,:],x_i))
+            phi_row = (1 + (mu_gas[i] / mu_gas) ** (0.5) * (self.MW / self.MW[i]) ** (0.25)) ** 2 / \
+                      (8 * (1 + (self.MW[i] / self.MW))) ** (0.5)
+
+            mu_mix[i] = x_i[i]*mu_gas[i]/(torch.dot(phi_row,x_i))
             
-        mu_mix = mu_mix * 0.1 # Convert CGS-Unit Poise to SI-Unit Pa*s 
-        return mu_mix
+        mu_mix_sum = torch.sum(mu_mix) * 0.1 # Convert CGS-Unit Poise to SI-Unit Pa*s 
+        
+        return mu_mix_sum
     
     def calc_area_radii(self, mole_fractions): 
         """
@@ -972,7 +973,7 @@ class PINN_loss(torch.nn.Module):
             # Calculate density of gas mixture via ideal gas (mixing rule = Dalton)
             rho_gas = torch.sum(torch.mul((x_i*self.p*1e5),self.MW))/(self.R * T)
             return rho_gas
-        
+
         # Calculate area of the volume elements
         mu_gas = torch.zeros([len(mole_fractions),1])
         rho_gas = torch.zeros([len(mole_fractions),1])
@@ -984,7 +985,7 @@ class PINN_loss(torch.nn.Module):
             torch.div(mu_gas,rho_gas).view(-1, self.n_elements).sum(dim=1).repeat(\
                     self.n_elements).view(-1, 1)
         area_elements = area_elements_devided_by_total_area * self.A
-        
+
         # Calculate radii of the volume elements
         radii_elements = torch.zeros([int(len(mole_fractions)/self.n_elements),self.n_elements+1])
         for i in range(int(len(mole_fractions)/self.n_elements)):
@@ -992,7 +993,7 @@ class PINN_loss(torch.nn.Module):
                 new_radius = (area_elements[i * self.n_elements + j] / math.pi + radii_elements[i, j] ** 2) ** 0.5
                 radii_elements[i] = torch.cat((radii_elements[i, :j + 1], torch.tensor([new_radius]), radii_elements[i, j + 2:]))
         radii_elements = radii_elements.view(-1, 1)
-        
+
         return (area_elements, radii_elements)
     
     def calc_flow_velocity(self, mole_fractions, area_elements):
@@ -1199,14 +1200,11 @@ class PINN_loss(torch.nn.Module):
             # formula for the thermal conductivity of gas mixtures. 
             # Phys Fluids 1958;1:361e9
             lmbd_mix = torch.zeros([len(x_i)])
-            A = torch.zeros([len(x_i), len(x_i)])
             for i in range(len(x_i)):
-                for j in range(len(x_i)):
-                    A[i,j] = (1 + (lmbd_gas[i]/lmbd_gas[j])**(0.5) * (self.MW[i]/self.MW[j])**(0.25))**2/ \
-                        (8*(1 + (self.MW[i]/self.MW[j]) ))**(0.5)
-            
-                lmbd_mix[i] = x_i[i]*lmbd_gas[i]/torch.dot(A[i,:], x_i)
-            
+                A_row = (1 + (lmbd_gas[i] / lmbd_gas) ** (0.5) * (self.MW[i] / self.MW) ** (0.25)) ** 2 / \
+                        (8 * (1 + (self.MW[i] / self.MW))) ** (0.5)
+                lmbd_mix[i] = x_i[i] * lmbd_gas[i] / torch.dot(A_row, x_i)
+                
             lmbd_mix_sum = torch.sum(lmbd_mix)
             
             return lmbd_mix_sum
@@ -1428,7 +1426,7 @@ class PINN_loss(torch.nn.Module):
         # Calculate the weighting factors of the losses
         weight_factors = torch.zeros_like(x)
         for i in range(x.size(0)):
-            w_i = torch.exp(-self.epsilon*torch.sum(losses[0:i]))
+            w_i = torch.exp(-self.causality_parameter*torch.sum(losses[0:i]))
             weight_factors[i] = w_i
         self.weight_factors = weight_factors
         
@@ -1571,6 +1569,8 @@ def train(x, y, network, calc_loss, optimizer, num_epochs):
     # Training loop
     loss_values = np.zeros((num_epochs,25))
     for epoch in range(num_epochs):
+        # Count the time per epoch
+        start_time = time.time()
         # Updating the network parameters with calculated losses and gradients 
         # from the closure-function
         optimizer.step(closure)
@@ -1581,9 +1581,12 @@ def train(x, y, network, calc_loss, optimizer, num_epochs):
             calc_loss(x, y, network(x))
         loss_values[epoch,:] = np.hstack((np.array(total_loss.detach().numpy()),\
                                           losses_before_weighting,losses_after_weighting))
-
+            
+        end_time = time.time()
+        execution_time = end_time - start_time
         print('Epoch: ', epoch+1, 'Loss: ', total_loss.item(), 'causal weights sum: ', \
-              np.round(np.sum(calc_loss.weight_factors.detach().numpy()),decimals=4))
+              np.round(np.sum(calc_loss.weight_factors.detach().numpy()),decimals=4), \
+                  'Time_per_epoch: ', execution_time)
         """
         # Create plots in the given plot_interval
         if (epoch+1)%plot_interval == 0 or epoch == 0:
