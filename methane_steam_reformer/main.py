@@ -970,24 +970,26 @@ class PINN_loss(torch.nn.Module):
                                        from the centre of the reactor [m]
         """
         
-        # Calculate area of the volume elements
+        # Calculate mu_gas and rho_gas
         mu_gas = self.calc_mu_gas(self.temperature, mole_fractions)
-        rho_gas = torch.sum(torch.mul((mole_fractions*self.p*1e5),self.MW),dim=1).view(-1, 1)/(self.R * self.temperature)
-        
-        area_elements_devided_by_total_area = torch.div(mu_gas,rho_gas)/\
+        rho_gas = torch.sum(torch.mul((mole_fractions * self.p * 1e5), self.MW), dim=1).view(-1, 1) / (self.R * self.temperature)
+    
+        # Calculate the area of the volume elements
+        area_elements_devided_by_total_area = torch.div(mu_gas, rho_gas)/\
             torch.div(mu_gas,rho_gas).view(-1, self.n_elements).sum(dim=1).repeat(\
                     self.n_elements).view(-1, 1)
         area_elements = area_elements_devided_by_total_area * self.A
-
+        
         # Calculate radii of the volume elements
-        radii_elements = torch.zeros([int(len(mole_fractions)/self.n_elements),self.n_elements+1])
-        for i in range(int(len(mole_fractions)/self.n_elements)):
-            for j in range(self.n_elements):
-                new_radius = (area_elements[i * self.n_elements + j] / math.pi + radii_elements[i, j] ** 2) ** 0.5
-                radii_elements[i] = torch.cat((radii_elements[i, :j + 1], torch.tensor([new_radius]), radii_elements[i, j + 2:]))
-        radii_elements = radii_elements.view(-1, 1)
+        reshaped_area_elements = area_elements.view(int(len(mole_fractions)/self.n_elements),self.n_elements)
+        radii_elements_columns  = [torch.zeros([int(len(mole_fractions)/self.n_elements),1])]
+        for i in range(self.n_elements):
+            radii_elements_column = torch.sqrt((reshaped_area_elements[:,i].unsqueeze(1)/math.pi)+radii_elements_columns[i]**2)
+            radii_elements_columns.append(radii_elements_column)
+        radii_elements = torch.cat(radii_elements_columns, dim=1)
+        radii_elements_new = radii_elements.view(-1, 1)
 
-        return (area_elements, radii_elements)
+        return (area_elements, radii_elements_new)
     
     def calc_flow_velocity(self, mole_fractions, area_elements):
         """
@@ -1006,25 +1008,26 @@ class PINN_loss(torch.nn.Module):
                                            volume elements [m/s]
         """
         
-        # Calculation of the averaged quantities over the elements
-        mole_fractions_average = torch.zeros([int(len(mole_fractions)/self.n_elements),6])
-        for i in range(int(len(mole_fractions)/self.n_elements)):
-            for j in range(self.n_elements):
-                mole_fractions_average[i] = mole_fractions_average[i] + \
-                    mole_fractions[i*self.n_elements+j] * area_elements[i*self.n_elements+j]/ \
-                        torch.sum(area_elements[i*self.n_elements:(i+1)*self.n_elements])
-        temperature_average = torch.mul(self.temperature, area_elements).view(-1, self.n_elements).sum(dim=1).view(-1, 1)/ \
-            area_elements.view(-1, self.n_elements).sum(dim=1).view(-1, 1)
-        molar_mass_0 = torch.dot(self.inlet_mole_fractions, self.MW).expand(int(len(mole_fractions)/self.n_elements),1)
-        molar_mass_average = torch.mm(mole_fractions_average, self.MW.view(-1, 1))
+        # Calculation of the averaged mole fraction
+        reshaped_mole_fractions = mole_fractions.view(-1, self.n_elements, mole_fractions.size(1))
+        reshaped_area_elements = area_elements.view(-1, self.n_elements, 1)
+        mole_fractions_weighted = reshaped_mole_fractions * reshaped_area_elements
+        mole_fractions_average = mole_fractions_weighted.sum(dim=1) / reshaped_area_elements.sum(dim=1)
         
+        # Calculation of the averaged temperature
+        reshaped_temperature = self.temperature.view(-1, self.n_elements, 1)
+        temperature_weighted = reshaped_temperature * reshaped_area_elements
+        temperature_average = temperature_weighted.sum(dim=1) / reshaped_area_elements.sum(dim=1)
+
+        # Calculation of the averaged molar mass
+        molar_mass_0 = torch.dot(self.inlet_mole_fractions, self.MW).expand(mole_fractions.size(0) // self.n_elements, 1)
+        molar_mass_average = torch.mm(mole_fractions_average, self.MW.view(-1, 1))
+
         # Calculate averaged flow velocity 
-        flow_velocity_average = self.u0 * (temperature_average*molar_mass_0)/ \
-            (self.T0*molar_mass_average)
-            
+        flow_velocity_average = self.u0 * (temperature_average * molar_mass_0) / (self.T0 * molar_mass_average)  
         flow_velocity_average = flow_velocity_average.repeat(10, 1)
         
-        return flow_velocity_average
+        return flow_velocity_average 
     
     def calculate_thermo_properties(self, T):
         """
@@ -1162,49 +1165,8 @@ class PINN_loss(torch.nn.Module):
             dTdz (1D-array): derivatives of the temperature in dependence of the 
                              reactor length of each volume element [K m-1]
         """
-        
-        def calc_mu_gas_old(T, x_i):
-            """
-            Calculates the dynamic viscosities of the single components mu_i and then
-            calculates the gas mixture dynamic viscosity.
-    
-            Args:
-                T (float): temperature of the volume element [K]
-                x_i (1D-array): ammount of substance of all species of the volume 
-                                element [-]
-            
-            New Params:
-                mu_mix (float): gas mixture dynamic viscosity [Pa s]
-            """
-            
-            # PHYSICAL PROPERTIES OF LIQUIDS AND GASES, 
-            # https://booksite.elsevier.com/9780750683661/Appendix_C.pdf
-            # NASA Polynomial in CGS-Unit µP (Poise)
-            mu_CH4 = 3.844 + 4.0112*1e-1*T + -1.4303*1e-4*T**2
-            mu_H2O = -36.826 + 4.29*1e-1*T + -1.62*1e-5*T**2
-            mu_H2 = 27.758 + 2.12*1e-1*T + -3.28*1e-5*T**2
-            mu_CO = 23.811 + 5.3944*1e-1*T + -1.5411*1e-4*T**2
-            mu_CO2 = 11.811 + 4.9838*1e-1*T + -1.0851*1e-4*T**2
-            mu_N2 = 42.606 + 4.75*1e-1*T + -9.88*1e-5*T**2
-            
-            mu_gas = torch.cat([mu_CH4, mu_H2O, mu_H2, mu_CO, mu_CO2, mu_N2]) * 1e-6 # µP -> P
-            
-            # Method of Wilke: 
-            # Chapter 9.5 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
-            # Simple and Accurate Method for Calculatlng Viscosity of Gaseous Mixtures
-            # by Thomas A. Davidson
-            mu_mix = torch.zeros([len(x_i)])
-            for i in range(len(x_i)):
-                phi_row = (1 + (mu_gas[i] / mu_gas) ** (0.5) * (self.MW / self.MW[i]) ** (0.25)) ** 2 / \
-                          (8 * (1 + (self.MW[i] / self.MW))) ** (0.5)
-    
-                mu_mix[i] = x_i[i]*mu_gas[i]/(torch.dot(phi_row,x_i))
-                
-            mu_mix_sum = torch.sum(mu_mix) * 0.1 # Convert CGS-Unit Poise to SI-Unit Pa*s 
-            
-            return mu_mix_sum
-        
-        def calc_lambda_gas(T, x_i):
+
+        def calc_lambda_gas(T, x):
             """
             Calculates the conductivities of the single components lambda_i and then
             the gas mixture conductivity.
@@ -1224,7 +1186,7 @@ class PINN_loss(torch.nn.Module):
             lambda_CO2 = -0.012 + 1.0208*1e-4*T + -2.2403*1e-8*T**2
             lambda_N2 = 0.00309 + 7.593*1e-5*T + -1.1014*1e-8*T**2
 
-            lmbd_gas = torch.cat((lambda_CH4, lambda_H2O, lambda_H2, lambda_CO, lambda_CO2, lambda_N2))
+            lmbd_gas = torch.cat([lambda_CH4, lambda_H2O, lambda_H2, lambda_CO, lambda_CO2, lambda_N2],dim=1)
             
             # Method of Wassiljewa:
             # Chapter 10.6 THE PROPERTIES OF GASES AND LIQUIDS Bruce E. Poling / A 
@@ -1233,17 +1195,19 @@ class PINN_loss(torch.nn.Module):
             # Calculation A(i,j) by Mason, Saxena: Mason EA, Saxena SC. Approximate 
             # formula for the thermal conductivity of gas mixtures. 
             # Phys Fluids 1958;1:361e9
-            lmbd_mix = torch.zeros([len(x_i)])
-            for i in range(len(x_i)):
-                A_row = (1 + (lmbd_gas[i] / lmbd_gas) ** (0.5) * (self.MW[i] / self.MW) ** (0.25)) ** 2 / \
+            num_components = 6
+            lmbd_mix = torch.zeros([len(x),num_components])
+            for i in range(num_components):
+                A_row = (1 + (lmbd_gas[:,i].view(-1, 1) / lmbd_gas) ** (0.5) * (self.MW[i] / self.MW) ** (0.25)) ** 2 / \
                         (8 * (1 + (self.MW[i] / self.MW))) ** (0.5)
-                lmbd_mix[i] = x_i[i] * lmbd_gas[i] / torch.dot(A_row, x_i)
+                        
+                lmbd_mix[:,i] = x[:,i] * lmbd_gas[:,i] / (torch.sum(A_row * x, dim=1))
                 
-            lmbd_mix_sum = torch.sum(lmbd_mix)
+            lmbd_mix_sum = torch.sum(lmbd_mix,dim=1).view(-1, 1)
             
             return lmbd_mix_sum
                     
-        def calc_heat_transfer(T, x_i, rho_g, cp_i, u_gas):
+        def calc_heat_transfer(T, x, rho_g, cp, u_gas):
             """
             Calculation of the heat transfer in the fixed bed (lmbd_er) and 
             between the fixed bed and the reactor wall (a_w). It is assumed 
@@ -1265,18 +1229,18 @@ class PINN_loss(torch.nn.Module):
                 lmbd_er: Thermal conductivity in the fixed bed [kJ m-1 h-1 K-1]
             """
             
-            mu_g = calc_mu_gas_old(T, x_i)
-            lmbd_g = calc_lambda_gas(T, x_i)
-            cps_g_mix = torch.dot(x_i, (cp_i * (1/self.MW)))
+            mu_g = self.calc_mu_gas(T, x)
+            lmbd_g = calc_lambda_gas(T, x)
+            cps_g_mix = torch.sum(x * (cp * (1/self.MW)), dim=1).view(-1, 1)
             l_c = self.d_pi
             N_Re = rho_g * u_gas * l_c / mu_g
-            N_Pr = cps_g_mix * mu_g / lmbd_g;
+            N_Pr = cps_g_mix * mu_g / lmbd_g
 
             a_w = (1 - 1.5 * (self.d_in/self.d_pi)**(-1.5)) * \
-                   (lmbd_g * 3.6)/self.d_pi * N_Re**(0.59) * N_Pr**(1/3);
-            a_rs = 0.8171*(self.em/(2-self.em))*(T/100)**(3);
+                   (lmbd_g * 3.6)/self.d_pi * N_Re**(0.59) * N_Pr**(1/3)
+            a_rs = 0.8171*(self.em/(2-self.em))*(T/100)**(3)
             a_ru = (0.8171*(T/100)**(3))/(1+self.epsilon/2 * (1-self.epsilon) * \
-                    (1-self.em)/self.em);
+                    (1-self.em)/self.em)
 
             lmbd_er_0 = self.epsilon*(lmbd_g*3.6 + 0.95*a_ru*self.d_pi) + \
                         (0.95 * (1 - self.epsilon))/(2/(3*self.lambda_s*3.6) + \
@@ -1286,7 +1250,7 @@ class PINN_loss(torch.nn.Module):
                       (self.d_pi/self.d_out)**(2))
             
             return (a_w, lmbd_er)
-
+        
         # Calculate quantities for heat transfer
         density_gas = torch.sum(self.p * 1e5 * mole_fractions * self.MW, dim=1, keepdim=True) / \
                             (self.R * self.temperature)
@@ -1296,12 +1260,8 @@ class PINN_loss(torch.nn.Module):
         mult_density_gas_cp = cp_gas*density_gas*1e3
         
         # Calculate heat transfer
-        alpha_w_int = torch.zeros([1000,1])
-        lambda_rad = torch.zeros([1000,1])
-        for i in range(len(mole_fractions)):
-            alpha_w_int[i], lambda_rad[i] = calc_heat_transfer(self.temperature[i],\
-                mole_fractions[i], density_gas[i], cp_i[i], flow_velocity[i])
-        
+        alpha_w_int, lambda_rad = calc_heat_transfer(self.temperature,\
+                mole_fractions, density_gas, cp_i, flow_velocity)
         alpha_w_int = alpha_w_int.view(int(len(alpha_w_int)/10), self.n_elements).t()
         lambda_rad = lambda_rad.view(int(len(lambda_rad)/10), self.n_elements).t()
         temperature = self.temperature.view(int(len(self.temperature)/10), self.n_elements).t()
@@ -1412,7 +1372,7 @@ class PINN_loss(torch.nn.Module):
         
         # Calculate the element area and radii with darcy's law
         area_elements, radii_elements = PINN_loss.calc_area_radii(self, mole_fractions)
-        
+
         # Consider dependence of temperature and gas composition of the flow velocity
         flow_velocity = PINN_loss.calc_flow_velocity(self, mole_fractions, area_elements)
         
