@@ -148,6 +148,7 @@ class generate_data():
         n_CO_0 = ammount_of_substances[3]
         n_CO2_0 = ammount_of_substances[4]
         n_N2_0 = ammount_of_substances[5]
+        self.n_N2_0 = ammount_of_substances[5]
         
         return np.array([n_CH4_0, n_H2O_0, n_H2_0, n_CO_0, n_CO2_0, n_N2_0])
            
@@ -1279,6 +1280,7 @@ class PINN_loss(torch.nn.Module):
                     (alpha_w_int[i,:]+(lambda_rad[i,:]/(0.5*(radii_elements[i+1,:]-radii_elements[i,:]))))* (temperature[-1,:]-self.T_wall)
             else:
         	    heat_flow_rate[i,:] = lambda_rad[i,:]*(temperature[i-1,:]-temperature[i,:])/(radii_elements[i+1,:]-radii_elements[i,:])
+        self.heat_flow_rate = heat_flow_rate
 
         # Calculate derivative of the heat balance
         Kp, H_R = self.calculate_thermo_properties(self.temperature)
@@ -1393,6 +1395,22 @@ class PINN_loss(torch.nn.Module):
         
         return [loss_GE_CH4, loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, loss_GE_T]
     
+    def calc_BC_loss(self, y_pred, x):
+        # Use the heat flow rate from the calculation of dTdz from GE
+        dq_dt_center = torch.autograd.grad(outputs=self.heat_flow_rate[0,:], inputs=x,
+                                grad_outputs=torch.ones_like(self.heat_flow_rate[0,:]),
+                                retain_graph=True, create_graph=True)[0]
+        dq_dt_wall = torch.autograd.grad(outputs=self.heat_flow_rate[-1,:], inputs=x,
+                                grad_outputs=torch.ones_like(self.heat_flow_rate[-1,:]),
+                                retain_graph=True, create_graph=True)[0]  
+
+        # Calculation of losses
+        loss_BC_center = (dq_dt_center[::10] - self.heat_flow_rate[0,:].unsqueeze(1))**2
+        loss_BC_wall = (dq_dt_wall[::10] - self.heat_flow_rate[-1,:].unsqueeze(1))**2
+        
+        return [loss_BC_center, loss_BC_wall]
+        
+        
     def causal_training(self, x, loss_IC_CH4, loss_IC_H2O, loss_IC_H2, \
                         loss_IC_CO, loss_IC_CO2, loss_IC_T, loss_GE_CH4, \
                         loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, \
@@ -1449,6 +1467,7 @@ class PINN_loss(torch.nn.Module):
             loss_IC_CO2, loss_IC_T = self.calc_IC_loss(y_pred, x)
         loss_GE_CH4, loss_GE_H2O, loss_GE_H2, loss_GE_CO, \
             loss_GE_CO2, loss_GE_T = self.calc_GE_loss(y_pred, x)
+        loss_BC_center, loss_BC_wall = self.calc_BC_loss(y_pred, x)
         
         # Store losses before weighting
         losses_before_weighting = np.array([np.mean(loss_IC_CH4.detach().numpy()), \
@@ -1499,11 +1518,7 @@ class PINN_loss(torch.nn.Module):
         
         return [total_loss, losses_before_weighting, losses_after_weighting]
 
-#def train(x, y, network, calc_loss, optimizer, num_epochs, analytical_solution_x_CH4, \
-#          analytical_solution_x_H20, analytical_solution_x_H2, analytical_solution_x_CO, \
-#          analytical_solution_x_CO2, analytical_solution_x_N2, analytical_solution_T, \
-#          n_N2_0, plot_interval):
-def train(x, y, network, calc_loss, optimizer, num_epochs):    
+def train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, analytical_solution, n_N2_0, n_elements, reactor_lengths):    
     def closure():
         """
         The Closure function is required for the L-BFGS optimiser.
@@ -1554,6 +1569,46 @@ def train(x, y, network, calc_loss, optimizer, num_epochs):
         
         print(f"Der Ordner '{folder_name}' wurde überprüft und gegebenenfalls erstellt bzw. geleert.")
     
+    def calc_results(y_pred, n_elements):
+        """
+        Calculate the 
+        
+        Args:
+            y (2D-array): Prediction of the reactor model containing the 
+                          ammount of substances [kmol h-1] and temperatures [K] 
+                          of each element as a function of the reactor length.
+        
+        New Params:
+            X_CH4 (1D-array): Conversion of methane averaged over all volume 
+                              elements as a function of reactor length [-]
+            Y_CO2 (1D-array): Yield of carbon dioxide averaged over all volume 
+                              elements as a function of reactor length [-]
+            T_avg (1D-array): Reactor temperature averaged over all volume 
+                              elements as a function of reactor length [K]
+        """
+        
+        # Calculate mole fractions
+        x_CH4 = np.sum(y_pred[:,0].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
+        x_H2O = np.sum(y_pred[:,1].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
+        x_H2 = np.sum(y_pred[:,2].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
+        x_CO = np.sum(y_pred[:,3].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
+        x_CO2 = np.sum(y_pred[:,4].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
+        x_N2 = np.sum(y_pred[:,5].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
+        
+        # Calculate conversion of CH4
+        X_CH4 = (np.sum(y_pred[:n_elements,0])-np.sum(y_pred[:,0].reshape(-1, n_elements), axis=1)) / \
+            np.sum(y_pred[:n_elements,0])
+        
+        # Calculate yield of CO2
+        Y_CO2 = (np.sum(y_pred[:,4].reshape(-1, n_elements), axis=1)-np.sum(y_pred[:n_elements,4])) / \
+            np.sum(y_pred[:n_elements,0])
+            
+        # Calculate temperature
+        T_avg = np.sum(y_pred[:,6].reshape(-1, n_elements),axis=1)/n_elements
+        
+        return np.column_stack((x_CH4, x_H2O, x_H2, x_CO, x_CO2, x_N2, X_CH4, Y_CO2, T_avg))
+        
+    
     # Prepare folders for the plots 
     prepare_plots_folder()
     
@@ -1581,50 +1636,34 @@ def train(x, y, network, calc_loss, optimizer, num_epochs):
         print('Epoch: ', epoch+1, 'Loss: ', total_loss.item(), 'causal weights sum: ', \
               np.round(np.sum(calc_loss.weight_factors.detach().numpy()),decimals=4), \
                   'Time_per_epoch: ', execution_time)
-        """
+
         # Create plots in the given plot_interval
-        if (epoch+1)%plot_interval == 0 or epoch == 0:
+        if (epoch+1)%plot_interval == 0 or epoch == 0 or epoch == num_epochs-1:
             # Predict ammount of substances an temperature with the neural network
             y_pred = network(x)
             y_pred = y_pred.detach().numpy()
-            y_pred = np.insert(y_pred, 2, n_N2_0, axis=1)
-            predicted_x_CH4, predicted_x_H20, predicted_x_H2, predicted_x_CO, \
-                predicted_x_CO2, predicted_x_N2 = calc_mole_frac(y_pred[:,:6])
-            predicted_T = y_pred[:, 6]
+            y_pred = np.insert(y_pred, 5, n_N2_0, axis=1)
+            
+            predicted_solution = calc_results(y_pred, n_elements)
             
             # Plot ammount of substances, temperature and weight factors
-            plots(x.detach().numpy(),analytical_solution_x_CH4, analytical_solution_x_H20, \
-                  analytical_solution_x_H2, analytical_solution_x_CO, analytical_solution_x_CO2, \
-                  analytical_solution_x_N2, analytical_solution_T, predicted_x_CH4, predicted_x_H20, \
-                  predicted_x_H2, predicted_x_CO, predicted_x_CO2, predicted_x_N2, predicted_T, save_plot=True, \
+            plots(reactor_lengths, analytical_solution, predicted_solution, n_elements, save_plot=True, \
                         plt_num=epoch+1, weight_factors=calc_loss.weight_factors)
-        """
-    return [loss_values]    
-
-
-def calc_mole_frac(n_matrix):
-    """
-    Calculate mole fractions from the ammount of substances. Takes into account 
-    only six species.
     
-    Args:
-        n_matrix (2D-array): ammount of substance from all species in 
-                             dependence of the reactor length [kmol h-1]
-    """
-
-    x_CH4 = n_matrix[:,0]/np.sum(n_matrix, axis=1)
-    x_H20 = n_matrix[:,1]/np.sum(n_matrix, axis=1)
-    x_H2 = n_matrix[:,2]/np.sum(n_matrix, axis=1)
-    x_CO = n_matrix[:,3]/np.sum(n_matrix, axis=1)
-    x_CO2 = n_matrix[:,4]/np.sum(n_matrix, axis=1)
-    x_N2 = n_matrix[:,5]/np.sum(n_matrix, axis=1)
+    ## Create final plots
+    # Predict ammount of substances an temperature with the neural network
+    y_pred = network(x)
+    y_pred = y_pred.detach().numpy()
+    y_pred = np.insert(y_pred, 5, n_N2_0, axis=1)
     
-    return [x_CH4,x_H20,x_H2,x_CO,x_CO2,x_N2]
+    predicted_solution = calc_results(y_pred, n_elements)
+    
+    # Plot ammount of substances, temperature and weight factors
+    plots(reactor_lengths, analytical_solution, predicted_solution, n_elements, save_plot = True, \
+                plt_num = f'{num_epochs}_final', weight_factors = calc_loss.weight_factors, loss_values=loss_values)
+       
 
-def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20, \
-      analytical_solution_x_H2, analytical_solution_x_CO, analytical_solution_x_CO2, \
-      analytical_solution_x_N2, analytical_solution_T, predicted_x_CH4, predicted_x_H20, \
-      predicted_x_H2, predicted_x_CO, predicted_x_CO2, predicted_x_N2, predicted_T, \
+def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
       save_plot=False, plt_num=None, weight_factors=None, loss_values=None, msd_NN=None):
     """
     This function is used to save the plots during the training and after the 
@@ -1640,23 +1679,23 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
     
     # Mole fractions plot
     plt.figure()
-    plt.plot(reactor_lengths, analytical_solution_x_CH4, 'g-', label=r'$x_{\rm{CH_{4}}}$')
-    plt.scatter(reactor_lengths, predicted_x_CH4, color = 'g', s=12, alpha=0.8, \
+    plt.plot(reactor_lengths, analytical_solution[:,0], 'g-', label=r'$x_{\rm{CH_{4}}}$')
+    plt.scatter(reactor_lengths, predicted_solution[:,0], color = 'g', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$x_{\rm{CH_{4},pred}}$')
-    plt.plot(reactor_lengths, analytical_solution_x_H20, 'r-', label=r'$x_{\rm{H_{2}O}}$')
-    plt.scatter(reactor_lengths, predicted_x_H20, color = 'r', s=12, alpha=0.8, \
+    plt.plot(reactor_lengths, analytical_solution[:,1], 'r-', label=r'$x_{\rm{H_{2}O}}$')
+    plt.scatter(reactor_lengths, predicted_solution[:,1], color = 'r', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$x_{\rm{H_{2}O,pred}}$')
-    plt.plot(reactor_lengths, analytical_solution_x_H2, 'm-', label=r'$x_{\rm{H_{2}}}$')
-    plt.scatter(reactor_lengths, predicted_x_H2, color = 'm', s=12, alpha=0.8, \
+    plt.plot(reactor_lengths, analytical_solution[:,2], 'm-', label=r'$x_{\rm{H_{2}}}$')
+    plt.scatter(reactor_lengths, predicted_solution[:,2], color = 'm', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$x_{\rm{H_{2},pred}}$')
-    plt.plot(reactor_lengths, analytical_solution_x_CO, 'c-', label=r'$x_{\rm{CO}}$')
-    plt.scatter(reactor_lengths, predicted_x_CO, color = 'c', s=12, alpha=0.8, \
+    plt.plot(reactor_lengths, analytical_solution[:,3], 'c-', label=r'$x_{\rm{CO}}$')
+    plt.scatter(reactor_lengths, predicted_solution[:,3], color = 'c', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$x_{\rm{CO,pred}}$')
-    plt.plot(reactor_lengths, analytical_solution_x_CO2, 'y-', label=r'$x_{\rm{CO_{2}}}$')
-    plt.scatter(reactor_lengths, predicted_x_CO2, color = 'y', s=12, alpha=0.8, \
+    plt.plot(reactor_lengths, analytical_solution[:,4], 'y-', label=r'$x_{\rm{CO_{2}}}$')
+    plt.scatter(reactor_lengths, predicted_solution[:,4], color = 'y', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$x_{\rm{CO_{2},pred}}$')
-    plt.plot(reactor_lengths, analytical_solution_x_N2, 'b-', label=r'$x_{\rm{N_{2}}}$')
-    plt.scatter(reactor_lengths, predicted_x_N2, color = 'b', s=12, alpha=0.8, \
+    plt.plot(reactor_lengths, analytical_solution[:,5], 'b-', label=r'$x_{\rm{N_{2}}}$')
+    plt.scatter(reactor_lengths, predicted_solution[:,5], color = 'b', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$x_{\rm{N_{2},pred}}$')
     plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
     plt.ylabel(r'$mole\:fractions$')
@@ -1670,23 +1709,25 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
         
     # Temperature plot
     plt.figure()
-    plt.plot(reactor_lengths, analytical_solution_T, 'r-', label=r'$T$')
-    plt.scatter(reactor_lengths, predicted_T, color = 'g', s=12, alpha=0.8, \
+    plt.plot(reactor_lengths, analytical_solution[:,8], 'r-', label=r'$T$')
+    plt.scatter(reactor_lengths, predicted_solution[:,8], color = 'g', s=12, alpha=0.8, \
                 edgecolors='b', label=r'$T_{\rm{pred}}$')
     plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
     plt.ylabel(r'$temperature\:/\:\rm{K}$')
-    plt.ylim(analytical_solution_T[0],analytical_solution_T[-1])
+    plt.ylim(analytical_solution[0,8],analytical_solution[-1,8])
     plt.xlim(reactor_lengths[0],reactor_lengths[-1])
     plt.legend(loc='center right')
     
     if save_plot:
         plt.savefig(f'{folder_path}/temperature_{plt_num}.png', dpi=200)
         plt.close()
-        
+       
     # Plot weighting factors from causal training
     if weight_factors is not None:
+        weight_factors_plot = np.mean(weight_factors.detach().numpy().reshape(-1, n_elements), axis=1)
+        
         plt.figure()
-        plt.plot(reactor_lengths, weight_factors.detach().numpy(), 'r-', \
+        plt.plot(reactor_lengths, weight_factors_plot, 'r-', \
                  label=f'$sum:\:{np.round(np.sum(weight_factors.detach().numpy()),decimals=4)}$')
         plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
         plt.ylabel(r'$causal\:weighting\:factor$')
@@ -1697,24 +1738,24 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
         if save_plot:
             plt.savefig(f'{folder_path}/causal_weights_{plt_num}.png', dpi=200)
             plt.close()
-    
+
     # Plot losses without considering weighting factors
     if loss_values is not None:
         plt.figure()
-        epochs = list(range(1, len(loss_values[0])+1))
-        plt.plot(epochs, loss_values[0][:,0], '-', label=r'$L_{\rm{total}}$')
-        plt.plot(epochs, loss_values[0][:,1], '-', label=r'$L_{\rm{IC,CH_{4}}}$')
-        plt.plot(epochs, loss_values[0][:,2], '-', label=r'$L_{\rm{IC,H_{2}O}}$')
-        plt.plot(epochs, loss_values[0][:,3], '-', label=r'$L_{\rm{IC,H_{2}}}$')
-        plt.plot(epochs, loss_values[0][:,4], '-', label=r'$L_{\rm{IC,CO}}$')
-        plt.plot(epochs, loss_values[0][:,5], '-', label=r'$L_{\rm{IC,CO_{2}}}$')
-        plt.plot(epochs, loss_values[0][:,6], '-', label=r'$L_{\rm{IC,T}}$')
-        plt.plot(epochs, loss_values[0][:,7], '--', label=r'$L_{\rm{GE,CH_{4}}}$')
-        plt.plot(epochs, loss_values[0][:,8], '--', label=r'$L_{\rm{GE,H_{2}O}}$')
-        plt.plot(epochs, loss_values[0][:,9], '--', label=r'$L_{\rm{GE,H_{2}}}$')
-        plt.plot(epochs, loss_values[0][:,10], '--', label=r'$L_{\rm{GE,CO}}$')
-        plt.plot(epochs, loss_values[0][:,11], '--', label=r'$L_{\rm{GE,CO_{2}}}$')
-        plt.plot(epochs, loss_values[0][:,12], '--', label=r'$L_{\rm{GE,T}}$')
+        epochs = list(range(1, len(loss_values)+1))
+        plt.plot(epochs, loss_values[:,0], '-', label=r'$L_{\rm{total}}$')
+        plt.plot(epochs, loss_values[:,1], '-', label=r'$L_{\rm{IC,CH_{4}}}$')
+        plt.plot(epochs, loss_values[:,2], '-', label=r'$L_{\rm{IC,H_{2}O}}$')
+        plt.plot(epochs, loss_values[:,3], '-', label=r'$L_{\rm{IC,H_{2}}}$')
+        plt.plot(epochs, loss_values[:,4], '-', label=r'$L_{\rm{IC,CO}}$')
+        plt.plot(epochs, loss_values[:,5], '-', label=r'$L_{\rm{IC,CO_{2}}}$')
+        plt.plot(epochs, loss_values[:,6], '-', label=r'$L_{\rm{IC,T}}$')
+        plt.plot(epochs, loss_values[:,7], '--', label=r'$L_{\rm{GE,CH_{4}}}$')
+        plt.plot(epochs, loss_values[:,8], '--', label=r'$L_{\rm{GE,H_{2}O}}$')
+        plt.plot(epochs, loss_values[:,9], '--', label=r'$L_{\rm{GE,H_{2}}}$')
+        plt.plot(epochs, loss_values[:,10], '--', label=r'$L_{\rm{GE,CO}}$')
+        plt.plot(epochs, loss_values[:,11], '--', label=r'$L_{\rm{GE,CO_{2}}}$')
+        plt.plot(epochs, loss_values[:,12], '--', label=r'$L_{\rm{GE,T}}$')
         
         plt.xlabel(r'$Number\:of\:epochs$')
         plt.ylabel(r'$losses$')
@@ -1723,8 +1764,35 @@ def plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20,
         plt.legend(bbox_to_anchor=(1.04, 0.5), loc="center left", borderaxespad=0)
         
         if save_plot:
-            plt.savefig(f'{folder_path}/loss_values_{plt_num}.png', dpi=200)
+            plt.savefig(f'{folder_path}/loss_values_before_{plt_num}.png', dpi=200)
             plt.close()
+        
+        plt.figure()
+        epochs = list(range(1, len(loss_values)+1))
+        plt.plot(epochs, loss_values[:,0], '-', label=r'$L_{\rm{total}}$')
+        plt.plot(epochs, loss_values[:,13], '-', label=r'$L_{\rm{IC,CH_{4}}}$')
+        plt.plot(epochs, loss_values[:,14], '-', label=r'$L_{\rm{IC,H_{2}O}}$')
+        plt.plot(epochs, loss_values[:,15], '-', label=r'$L_{\rm{IC,H_{2}}}$')
+        plt.plot(epochs, loss_values[:,16], '-', label=r'$L_{\rm{IC,CO}}$')
+        plt.plot(epochs, loss_values[:,17], '-', label=r'$L_{\rm{IC,CO_{2}}}$')
+        plt.plot(epochs, loss_values[:,18], '-', label=r'$L_{\rm{IC,T}}$')
+        plt.plot(epochs, loss_values[:,19], '--', label=r'$L_{\rm{GE,CH_{4}}}$')
+        plt.plot(epochs, loss_values[:,20], '--', label=r'$L_{\rm{GE,H_{2}O}}$')
+        plt.plot(epochs, loss_values[:,21], '--', label=r'$L_{\rm{GE,H_{2}}}$')
+        plt.plot(epochs, loss_values[:,22], '--', label=r'$L_{\rm{GE,CO}}$')
+        plt.plot(epochs, loss_values[:,23], '--', label=r'$L_{\rm{GE,CO_{2}}}$')
+        plt.plot(epochs, loss_values[:,24], '--', label=r'$L_{\rm{GE,T}}$')
+        
+        plt.xlabel(r'$Number\:of\:epochs$')
+        plt.ylabel(r'$losses$')
+        plt.yscale('log')
+        plt.xlim(0,epochs[-1])
+        plt.legend(bbox_to_anchor=(1.04, 0.5), loc="center left", borderaxespad=0)
+        
+        if save_plot:
+            plt.savefig(f'{folder_path}/loss_values_after_{plt_num}.png', dpi=200)
+            plt.close()
+
         
 if __name__ == "__main__":
     # Define parameters for the model
@@ -1736,43 +1804,22 @@ if __name__ == "__main__":
     plot_analytical_solution = True #True,False
     
     input_size_NN = 1
-    hidden_size_NN = 3
+    hidden_size_NN = 32
     output_size_NN = 6
-    num_layers_NN = 1
-    num_epochs = 100
-    weight_factors = [1e1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
+    num_layers_NN = 3
+    num_epochs = 1000
+    weight_factors = [1e2,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
     epsilon = 0 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training
     
-    """
     # Calculation of the analytical curves
     model = generate_data(inlet_mole_fractions, bound_conds, reactor_conds)
     y = model.solve_ode(reactor_lengths, plot=plot_analytical_solution)
     
-    analytical_solution_x_CH4 = model.x_CH4
-    analytical_solution_x_H20 = model.x_H2O
-    analytical_solution_x_H2 = model.x_H2
-    analytical_solution_x_CO = model.x_CO
-    analytical_solution_x_CO2 = model.x_CO2
-    analytical_solution_x_N2 = model.x_N2
-    analytical_solution_X_CH4 = model.X_CH4
-    analytical_solution_Y_CO2 = model.Y_CO2
-    analytical_solution_T_avg = model.T_avg
-    """
-    """
-    # Save results from python for the comparison with the results from matlab
-    np.save("python_z",reactor_lengths)
-    np.save("python_x_CH4",analytical_solution_x_CH4)
-    np.save("python_x_H20",analytical_solution_x_H20)
-    np.save("python_x_H2",analytical_solution_x_H2)
-    np.save("python_x_CO",analytical_solution_x_CO)
-    np.save("python_x_CO2",analytical_solution_x_CO2)
-    np.save("python_x_N2",analytical_solution_x_N2)
-    np.save("python_X_CH4",analytical_solution_X_CH4)
-    np.save("python_Y_CO2",analytical_solution_Y_CO2)
-    np.save("python_T_avg",analytical_solution_T_avg)
-    """
-    torch.autograd.set_detect_anomaly(False)
+    analytical_solution = np.column_stack((model.x_CH4, model.x_H2O, model.x_H2, model.x_CO, \
+                           model.x_CO2, model.x_N2, model.X_CH4, model.Y_CO2, \
+                               model.T_avg))
+    
     # Set up the neural network
     network = NeuralNetwork(input_size_NN=input_size_NN, hidden_size_NN=hidden_size_NN,\
                             output_size_NN=output_size_NN, num_layers_NN=num_layers_NN,\
@@ -1787,32 +1834,9 @@ if __name__ == "__main__":
     # Train the neural network
     calc_loss = PINN_loss(weight_factors, epsilon, inlet_mole_fractions, \
                           bound_conds, reactor_conds) 
-        
-    #loss_values = train(x, y, network, calc_loss, optimizer, num_epochs, analytical_solution_x_CH4, \
-    #          analytical_solution_x_H20, analytical_solution_x_H2, analytical_solution_x_CO, \
-    #          analytical_solution_x_CO2, analytical_solution_x_N2, analytical_solution_T, \
-    #          model.n_N2_0, plot_interval)
-    loss_values = train(x, y, network, calc_loss, optimizer, num_epochs)
-    """
-    # Predict data with the trained neural network
-    y_pred = network(x)
-    # Convert the pytorch tensor to a numpy array
-    y_pred = y_pred.detach().numpy()
-    # Add the amount of substance from N2 to the the predicted data because N2 
-    # is not taken into account in the neural network (N2 stays constant)
-    y_pred = np.insert(y_pred, 2, model.n_N2_0, axis=1)
-    # Extract mole fractions
-    predicted_x_CH4, predicted_x_H20, predicted_x_H2, predicted_x_CO, \
-        predicted_x_CO2, predicted_x_N2 = calc_mole_frac(y_pred[:,:6])
-    predicted_T = y_pred[:, 6]
+    train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, \
+          analytical_solution, model.n_N2_0, reactor_conds[1], reactor_lengths)
     
-    # Plot the mole fraction, temperature and losses   
-    plots(reactor_lengths, analytical_solution_x_CH4, analytical_solution_x_H20, \
-          analytical_solution_x_H2, analytical_solution_x_CO, analytical_solution_x_CO2, \
-          analytical_solution_x_N2, analytical_solution_T, predicted_x_CH4, predicted_x_H20, \
-          predicted_x_H2, predicted_x_CO, predicted_x_CO2, predicted_x_N2, predicted_T, \
-          plt_num = f'{num_epochs}_final', save_plot = True, loss_values=loss_values)
     
     # Save model parameters
     #torch.save(network.state_dict(), 'PINN_state_03.10.23.pth')
-    """
