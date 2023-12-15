@@ -539,7 +539,7 @@ class generate_data():
                     (alpha_w_int+(lambda_rad/(0.5*(radii_elements[i+1]-radii_elements[i]))))* (temperature[-1]-self.T_wall)
             else:
         	    heat_flow_rate[i] = lambda_rad*(temperature[i-1]-temperature[i])/(radii_elements[i+1]-radii_elements[i])
-
+        
         # Calculate derivative of the heat balance
         dTdz = np.zeros([self.n_elements,1])
         for i in range(self.n_elements):
@@ -741,7 +741,7 @@ class generate_data():
         fig2 = plt.figure(figsize=(10,7))
         ax4 = fig2.add_subplot(111, projection='3d')
         T_2D = T_2D.transpose()
-        T_2D = np.concatenate((np.flip(T_2D, axis=0),T_2D[0,:].reshape((1, 100)),T_2D), axis=0)
+        T_2D = np.concatenate((np.flip(T_2D, axis=0),T_2D[0,:].reshape((1, int(T_2D.size/self.n_elements))),T_2D), axis=0)
         radii_2D = self.radii_2D
         radii_2D = np.concatenate((np.flip(radii_2D, axis=0),-1*radii_2D[1:,:]), axis=0)
         
@@ -1026,7 +1026,7 @@ class PINN_loss(torch.nn.Module):
 
         # Calculate averaged flow velocity 
         flow_velocity_average = self.u0 * (temperature_average * molar_mass_0) / (self.T0 * molar_mass_average)  
-        flow_velocity_average = flow_velocity_average.repeat(10, 1)
+        flow_velocity_average = flow_velocity_average.repeat(self.n_elements, 1)
         
         return flow_velocity_average 
     
@@ -1263,12 +1263,12 @@ class PINN_loss(torch.nn.Module):
         # Calculate heat transfer
         alpha_w_int, lambda_rad = calc_heat_transfer(self.temperature,\
                 mole_fractions, density_gas, cp_i, flow_velocity)
-        alpha_w_int = alpha_w_int.view(int(len(alpha_w_int)/10), self.n_elements).t()
-        lambda_rad = lambda_rad.view(int(len(lambda_rad)/10), self.n_elements).t()
-        temperature = self.temperature.view(int(len(self.temperature)/10), self.n_elements).t()
-        radii_elements = radii_elements.view(int(len(self.temperature)/10), self.n_elements+1).t()
+        alpha_w_int = alpha_w_int.view(int(len(alpha_w_int)/self.n_elements), self.n_elements).t()
+        lambda_rad = lambda_rad.view(int(len(lambda_rad)/self.n_elements), self.n_elements).t()
+        temperature = self.temperature.view(int(len(self.temperature)/self.n_elements), self.n_elements).t()
+        radii_elements = radii_elements.view(int(len(self.temperature)/self.n_elements), self.n_elements+1).t()
         
-        heat_flow_rate = torch.zeros([self.n_elements+1, int(len(self.temperature)/10)])
+        heat_flow_rate = torch.zeros([self.n_elements+1, int(len(self.temperature)/self.n_elements)])
         for i in range(self.n_elements):   
             if i == 0:
                 # first boundary condition
@@ -1285,10 +1285,10 @@ class PINN_loss(torch.nn.Module):
         # Calculate derivative of the heat balance
         Kp, H_R = self.calculate_thermo_properties(self.temperature)
         s_H = -torch.sum((H_R*1e3)*(r_total)*self.rho_b, dim=1, keepdim=True)
-        s_H = s_H.view(int(len(s_H)/10), self.n_elements).t()
-        flow_velocity = flow_velocity.view(int(len(flow_velocity)/10), self.n_elements).t()
+        s_H = s_H.view(int(len(s_H)/self.n_elements), self.n_elements).t()
+        flow_velocity = flow_velocity.view(int(len(flow_velocity)/self.n_elements), self.n_elements).t()
         
-        dTdz = torch.zeros([self.n_elements, int(len(self.temperature)/10)])
+        dTdz = torch.zeros([self.n_elements, int(len(self.temperature)/self.n_elements)])
         for i in range(self.n_elements):
             dr = radii_elements[i+1,:]-radii_elements[i,:]
             # Calculation of the source term for external heat exchange
@@ -1298,7 +1298,7 @@ class PINN_loss(torch.nn.Module):
             dTdz_react = s_H[i,:]/(mult_density_gas_cp[i,:]*flow_velocity[i,:]*3.600)
             dTdz[i,:] = dTdz_cond+dTdz_react           
         
-        dTdz = torch.reshape(dTdz.t(), (1000, 1))
+        dTdz = torch.reshape(dTdz.t(), (dTdz.shape[1]*self.n_elements, 1))
         return dTdz
     
     def calc_IC_loss(self, y_pred, x):
@@ -1405,8 +1405,8 @@ class PINN_loss(torch.nn.Module):
                                 retain_graph=True, create_graph=True)[0]  
 
         # Calculation of losses
-        loss_BC_center = (dq_dt_center[::10] - self.heat_flow_rate[0,:].unsqueeze(1))**2
-        loss_BC_wall = (dq_dt_wall[::10] - self.heat_flow_rate[-1,:].unsqueeze(1))**2
+        loss_BC_center = (dq_dt_center[::self.n_elements] - self.heat_flow_rate[0,:].unsqueeze(1))**2
+        loss_BC_wall = (dq_dt_wall[::self.n_elements] - self.heat_flow_rate[-1,:].unsqueeze(1))**2
         
         return [loss_BC_center, loss_BC_wall]
         
@@ -1429,11 +1429,11 @@ class PINN_loss(torch.nn.Module):
         
         # Form the sum of the losses
         losses = torch.zeros_like(x)
-        losses[0,0] = loss_IC_CH4 + loss_IC_H2O + loss_IC_H2 + loss_IC_CO + \
-            loss_IC_CO2 + loss_IC_T + loss_GE_CH4[0] + loss_GE_H2O[0] + \
-                loss_GE_H2[0] + loss_GE_CO[0] + loss_GE_CO2[0] + loss_GE_T[0]
-        losses[1:] = loss_GE_CH4[1:] + loss_GE_H2O[1:] + loss_GE_H2[1:] + \
-            loss_GE_CO[1:] + loss_GE_CO2[1:] + loss_GE_T[1:]
+        losses[0:self.n_elements] = loss_IC_CH4 + loss_IC_H2O + loss_IC_H2 + loss_IC_CO + \
+            loss_IC_CO2 + loss_IC_T + loss_GE_CH4[0:self.n_elements] + loss_GE_H2O[0:self.n_elements] + \
+                loss_GE_H2[0:self.n_elements] + loss_GE_CO[0:self.n_elements] + loss_GE_CO2[0:self.n_elements] + loss_GE_T[0:self.n_elements]
+        losses[self.n_elements:] = loss_GE_CH4[self.n_elements:] + loss_GE_H2O[self.n_elements:] + loss_GE_H2[self.n_elements:] + \
+            loss_GE_CO[self.n_elements:] + loss_GE_CO2[self.n_elements:] + loss_GE_T[self.n_elements:]
         
         # Calculate the weighting factors of the losses
         weight_factors = torch.zeros_like(x)
@@ -1714,7 +1714,7 @@ def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
                 edgecolors='b', label=r'$T_{\rm{pred}}$')
     plt.xlabel(r'$reactor\:length\:/\:\rm{m}$')
     plt.ylabel(r'$temperature\:/\:\rm{K}$')
-    plt.ylim(analytical_solution[0,8],analytical_solution[-1,8])
+    #plt.ylim(analytical_solution[0,8],analytical_solution[-1,8])
     plt.xlim(reactor_lengths[0],reactor_lengths[-1])
     plt.legend(loc='center right')
     
@@ -1796,20 +1796,20 @@ def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
         
 if __name__ == "__main__":
     # Define parameters for the model
-    reactor_lengths = np.linspace(0,12,num=100)
+    reactor_lengths = np.linspace(0,12,num=200)
     inlet_mole_fractions = [0.2128,0.714,0.0259,0.0004,0.0119,0.035] #CH4,H20,H2,CO,CO2,N2
     bound_conds = [25.7,2.14,793,1100] #p,u_in,T_in,T_wall
     reactor_conds = [0.007, 10] #eta, n_elements
     
-    plot_analytical_solution = True #True,False
+    plot_analytical_solution = False #True,False
     
     input_size_NN = 1
     hidden_size_NN = 32
     output_size_NN = 6
     num_layers_NN = 3
     num_epochs = 1000
-    weight_factors = [1e2,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
-    epsilon = 0 #epsilon=0: old model, epsilon!=0: new model
+    weight_factors = [1,1,1,1,1e+2,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
+    epsilon = 1e-2 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training
     
     # Calculation of the analytical curves
@@ -1828,7 +1828,7 @@ if __name__ == "__main__":
                                   "strong_wolfe", max_eval=None, tolerance_grad \
                                       =1e-50, tolerance_change=1e-50)
         
-    x = torch.tensor(np.repeat(reactor_lengths, 10).reshape(-1, 1), requires_grad=True)
+    x = torch.tensor(np.repeat(reactor_lengths, reactor_conds[1]).reshape(-1, 1), requires_grad=True)
     y = None
     
     # Train the neural network
