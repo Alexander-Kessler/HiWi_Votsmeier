@@ -815,6 +815,9 @@ class NeuralNetwork(torch.nn.Module):
         x[:,4] = torch.exp(x[:,4])
         x[:,5] = torch.exp(x[:,5]) * self.T0
         
+        # Limit the values of the tensors so that no NaN are generated
+        x = torch.clamp(x, min=1e-10, max=1e10)
+        
         return x
 
 class PINN_loss(torch.nn.Module):
@@ -1436,12 +1439,13 @@ class PINN_loss(torch.nn.Module):
             loss_GE_CO[self.n_elements:] + loss_GE_CO2[self.n_elements:] + loss_GE_T[self.n_elements:]
         
         # Calculate the weighting factors of the losses
-        weight_factors = torch.zeros_like(x)
-        for i in range(x.size(0)):
-            w_i = torch.exp(-self.causality_parameter*torch.sum(losses[0:i]))
+        weight_factors = torch.zeros([int(losses.size(0)/self.n_elements)])
+        for i in range(weight_factors.size(0)):
+            w_i = torch.exp(-self.causality_parameter*torch.sum(losses[0:(i+1)*self.n_elements]))
             weight_factors[i] = w_i
+        weight_factors = weight_factors.repeat_interleave(self.n_elements)
         self.weight_factors = weight_factors
-        
+
         # Consider the weighting factors in the losses
         total_loss = torch.mean(weight_factors * losses)
             
@@ -1809,7 +1813,7 @@ if __name__ == "__main__":
     num_layers_NN = 3
     num_epochs = 1000
     weight_factors = [1,1,1,1,1e+2,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
-    epsilon = 1e-2 #epsilon=0: old model, epsilon!=0: new model
+    epsilon = 5e-8 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training
     
     # Calculation of the analytical curves
