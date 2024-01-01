@@ -345,7 +345,7 @@ class generate_data():
     def xu_froment(self, temperature, partial_pressures, area_elements):
         """
         Calculation of the differentials from the mass balance with the kinetic 
-        approach of Xu, Froment for each volume element.
+        approach of Xu, Froment.
         
         Args:
             temperature (1D-array): temperature of the volume elements [K]
@@ -358,8 +358,7 @@ class generate_data():
                                          k[2]=[kmol Pa-1 kgcat-1 h-1]
             K_ads (1D-array): adsorption constants, K_ads[1-3]=[Pa-1]
             r_total (1D-array): reaction rates [kmol kgcat-1 h-1]
-            dn_dz (1D-array): derivatives of the amounts of substances of the 
-                              species in dependence of the reactor length [kmol m-1 h-1]
+            dcDot_dz (1D-array): change of the concentration w.r.t to z coordinate[kmol m-3 h-1]
         """
         
         # Calculate derivative of the mass balance of each element
@@ -373,7 +372,7 @@ class generate_data():
             k = self.k0 * np.exp(-self.E_A/(self.R*temperature[i]))
             K_ads = self.K_ads_0 * np.exp(-self.G_R_ads/(self.R*temperature[i]))
             Kp, H_R = generate_data.calculate_thermo_properties(self, temperature[i])
-            
+                
             DEN = 1 + partial_pressures_element[3]*K_ads[0] + partial_pressures_element[2]*K_ads[1] + \
                 partial_pressures_element[0]*K_ads[2] + (partial_pressures_element[1]*K_ads[3]) / partial_pressures_element[2]
             r_total_element = np.zeros(3)
@@ -549,7 +548,7 @@ class generate_data():
                 (dr *(radii_elements[i]+dr*0.5)*mult_density_gas_cp[i]*flow_velocity*3.600)
             # Calculation of the source term for the reaction
             Kp, H_R = generate_data.calculate_thermo_properties(self, temperature[i])
-            s_H = -np.sum((H_R*1e3)*(r_total[i,:])*self.rho_b)
+            s_H = -np.sum((H_R*1e3)*(r_total[i,:])*self.rho_b) #????
             dTdz_react = s_H/(mult_density_gas_cp[i]*flow_velocity*3.600)
             dTdz[i] = dTdz_cond+dTdz_react           
             
@@ -808,6 +807,8 @@ class NeuralNetwork(torch.nn.Module):
         # The exponential function is used to ensure that the quantities 
         # are always positive. The multiplication of T0 provides a scaling of 
         # the high temperatures to a value close to 1 -> T/T0.
+
+        #x0 to x4 is molefractions, x5 is temperature
         x[:,0] = torch.exp(x[:,0])
         x[:,1] = torch.exp(x[:,1])
         x[:,2] = torch.exp(x[:,2])
@@ -843,6 +844,9 @@ class PINN_loss(torch.nn.Module):
                 w_IC_T (float): weighting factor from the loss function of 
                                 the initial condition which depends on the 
                                 reactor temperature [-]
+                w_BC_T (float): weighting factor from the loss function of
+                                the boundary condition which depends on the
+                                reactor temperature [-]
                                
             For the other arguments and parameters, please look in the
             class generate_data().
@@ -851,7 +855,7 @@ class PINN_loss(torch.nn.Module):
         
         # New parameter
         self.w_n, self.w_T, self.w_GE_n, self.w_GE_T, self.w_IC_n, \
-            self.w_IC_T = weight_factors
+            self.w_IC_T, self.w_BC_T = weight_factors
         self.causality_parameter = torch.tensor(epsilon)
         
         # Parameter known from the class generate_data()
@@ -995,7 +999,9 @@ class PINN_loss(torch.nn.Module):
 
         return (area_elements, radii_elements_new)
     
-    def calc_flow_velocity(self, mole_fractions, area_elements):
+    def calc_flow_velocity(self, mole_fractions, T):
+
+        #removed area_elements
         """
         Calculation of the flow velocity as a function of temperature and gas 
         composition.
@@ -1012,26 +1018,14 @@ class PINN_loss(torch.nn.Module):
                                            volume elements [m/s]
         """
         
-        # Calculation of the averaged mole fraction
-        reshaped_mole_fractions = mole_fractions.view(-1, self.n_elements, mole_fractions.size(1))
-        reshaped_area_elements = area_elements.view(-1, self.n_elements, 1)
-        mole_fractions_weighted = reshaped_mole_fractions * reshaped_area_elements
-        mole_fractions_average = mole_fractions_weighted.sum(dim=1) / reshaped_area_elements.sum(dim=1)
-        
-        # Calculation of the averaged temperature
-        reshaped_temperature = self.temperature.view(-1, self.n_elements, 1)
-        temperature_weighted = reshaped_temperature * reshaped_area_elements
-        temperature_average = temperature_weighted.sum(dim=1) / reshaped_area_elements.sum(dim=1)
-
         # Calculation of the averaged molar mass
-        molar_mass_0 = torch.dot(self.inlet_mole_fractions, self.MW).expand(mole_fractions.size(0) // self.n_elements, 1)
-        molar_mass_average = torch.mm(mole_fractions_average, self.MW.view(-1, 1))
+        molar_mass_0 = torch.dot(self.inlet_mole_fractions, self.MW)
+        molar_mass_average = torch.mm(mole_fractions, self.MW.view(-1, 1))
 
         # Calculate averaged flow velocity 
-        flow_velocity_average = self.u0 * (temperature_average * molar_mass_0) / (self.T0 * molar_mass_average)  
-        flow_velocity_average = flow_velocity_average.repeat(self.n_elements, 1)
+        flow_velocity = self.u0 * (T * molar_mass_0) / (self.T0 * molar_mass_average)  
         
-        return flow_velocity_average 
+        return flow_velocity 
     
     def calculate_thermo_properties(self, T):
         """
@@ -1090,7 +1084,7 @@ class PINN_loss(torch.nn.Module):
         return [Kp.t(), H_R.t()]
                                                    
 
-    def xu_froment(self, partial_pressures, area_elements):
+    def xu_froment(self, partial_pressures):
         """
         Calculation of the differentials from the mass balance with the kinetic 
         approach of Xu, Froment.
@@ -1103,22 +1097,21 @@ class PINN_loss(torch.nn.Module):
                                            k[2]=[kmol Pa-1 kgcat-1 h-1]
             K_ads (tensor): adsorption constants, K_ads[1-3]=[Pa-1]
             r_total (tensor): reaction rates [kmol kgcat-1 h-1]
-            dn_dz (tensor): derivatives of the amounts of substances of the 
-                            species in dependence of the reactor length [kmol m-1 h-1]
+            dc_dz (tensor): derivatives of the amounts of substances of the 
+                            species in dependence of the reactor length [kmol m-3 h-1]
         """
         
-        # Calculate derivative of the mass balance of each element
-        dn_dz = torch.zeros([len(partial_pressures),6])
-        r_total = torch.zeros([len(partial_pressures),3])
-        
+        dc_dz = torch.zeros([partial_pressures.shape[0], partial_pressures.shape[1]])
+        r_total = torch.zeros([partial_pressures.shape[0],3])
+  
         # Calculate reaction rates with a Langmuir-Hinshelwood-Houghen-Watson approach
         k = self.k0 * torch.exp(-self.E_A/(self.R*self.temperature))
         K_ads = self.K_ads_0 * torch.exp(-self.G_R_ads/(self.R*self.temperature))
-        Kp, H_R = PINN_loss.calculate_thermo_properties(self, self.temperature)
+        Kp, _ = self.calculate_thermo_properties(self.temperature)
         
         DEN = 1 + partial_pressures[:,3]*K_ads[:,0] + partial_pressures[:,2]*K_ads[:,1] + \
             partial_pressures[:,0]*K_ads[:,2] + (partial_pressures[:,1]*K_ads[:,3]) / partial_pressures[:,2]
-        r_total = torch.zeros(len(partial_pressures),3)
+        
         r_total[:,0] = (k[:,0] / (partial_pressures[:,2]**2.5)) * (partial_pressures[:,0] * \
                     partial_pressures[:,1] - (((partial_pressures[:,2]**3) * partial_pressures[:,3]) / \
                     Kp[:,0])) / (DEN**2)
@@ -1128,19 +1121,18 @@ class PINN_loss(torch.nn.Module):
         r_total[:,2] = (k[:,2] / (partial_pressures[:,2]**3.5)) * (partial_pressures[:,0] * \
                     (partial_pressures[:,1]**2) - (((partial_pressures[:,2]**4) * partial_pressures[:,4]) / \
                     Kp[:,2])) / (DEN**2)
-        r_total = self.eta * r_total
-            
-        # Calculate derivatives of the mass balance
-        dn_dz = torch.zeros([len(partial_pressures),5])
-        dn_dz[:,0] = area_elements.squeeze() * (-r_total[:,0] - r_total[:,2]) * self.rho_b
-        dn_dz[:,1] = area_elements.squeeze() * (-r_total[:,0] - r_total[:,1] - 2*r_total[:,2]) * self.rho_b
-        dn_dz[:,2] = area_elements.squeeze() * (3*r_total[:,0] + r_total[:,1] + 4*r_total[:,2]) * self.rho_b
-        dn_dz[:,3] = area_elements.squeeze() * (r_total[:,0] - r_total[:,1]) * self.rho_b
-        dn_dz[:,4] = area_elements.squeeze() * (r_total[:,1] + r_total[:,2]) * self.rho_b
         
-        return [dn_dz, r_total]
+        # Calculate derivatives of the concentrations
+        dc_dz[:,0] = self.eta  * (-r_total[:,0] - r_total[:,2]) * self.rho_b
+        dc_dz[:,1] = self.eta  * (-r_total[:,0] - r_total[:,1] - r_total[:,2]) * self.rho_b
+        dc_dz[:,2] = self.eta  * (3*r_total[:,0] + r_total[:,1] + 4*r_total[:,2]) * self.rho_b
+        dc_dz[:,3] = self.eta  * (r_total[:,0] - r_total[:,1]) * self.rho_b
+        dc_dz[:,4] = self.eta  * (r_total[:,1] + r_total[:,2]) * self.rho_b
+        dc_dz[:,5] = 0
+
+        return [dc_dz, r_total]
     
-    def heat_balance(self, mole_fractions, r_total, flow_velocity, radii_elements):
+    def heat_balance(self, r_total):
         """
         Calculation of the differentials of the heat balance for each volume 
         element.
@@ -1256,53 +1248,25 @@ class PINN_loss(torch.nn.Module):
             return (a_w, lmbd_er)
         
         # Calculate quantities for heat transfer
-        density_gas = torch.sum(self.p * 1e5 * mole_fractions * self.MW, dim=1, keepdim=True) / \
+        density_gas = torch.sum(self.p * 1e5 * self.mole_fractions * self.MW, dim=1, keepdim=True) / \
                             (self.R * self.temperature)
         cp_i = self.cp_coef[:,0] + self.cp_coef[:,1] * self.temperature + self.cp_coef[:,2] * \
             self.temperature**2 + self.cp_coef[:,3] * self.temperature**3
-        cp_gas = torch.mul(mole_fractions, cp_i/self.MW).sum(dim=1, keepdim=True)
-        mult_density_gas_cp = cp_gas*density_gas*1e3
+        cp_gas = torch.mul(self.mole_fractions, cp_i/self.MW).sum(dim=1, keepdim=True)
         
         # Calculate heat transfer
-        alpha_w_int, lambda_rad = calc_heat_transfer(self.temperature,\
-                mole_fractions, density_gas, cp_i, flow_velocity)
-        alpha_w_int = alpha_w_int.view(int(len(alpha_w_int)/self.n_elements), self.n_elements).t()
-        lambda_rad = lambda_rad.view(int(len(lambda_rad)/self.n_elements), self.n_elements).t()
-        temperature = self.temperature.view(int(len(self.temperature)/self.n_elements), self.n_elements).t()
-        radii_elements = radii_elements.view(int(len(self.temperature)/self.n_elements), self.n_elements+1).t()
-        
-        heat_flow_rate = torch.zeros([self.n_elements+1, int(len(self.temperature)/self.n_elements)])
-        for i in range(self.n_elements):   
-            if i == 0:
-                # first boundary condition
-                heat_flow_rate[i,:] = 0
-            elif i == self.n_elements-1:
-                heat_flow_rate[i,:] = lambda_rad[i,:]*(temperature[i-1,:]-temperature[i,:])/(radii_elements[i+1,:]-radii_elements[i,:])
-                # second boundary condition
-                heat_flow_rate[i+1,:] = (alpha_w_int[i,:]*lambda_rad[i,:]/(0.5*(radii_elements[i+1,:]-radii_elements[i,:])))/ \
-                    (alpha_w_int[i,:]+(lambda_rad[i,:]/(0.5*(radii_elements[i+1,:]-radii_elements[i,:]))))* (temperature[-1,:]-self.T_wall)
-            else:
-        	    heat_flow_rate[i,:] = lambda_rad[i,:]*(temperature[i-1,:]-temperature[i,:])/(radii_elements[i+1,:]-radii_elements[i,:])
-        self.heat_flow_rate = heat_flow_rate
+        a_w, lambda_rad = calc_heat_transfer(self.temperature,\
+                self.mole_fractions, density_gas, cp_i, self.flow_velocity)
+       
+        lambda_rad = lambda_rad * 1000 / 3600 # kJ m-1 h-1 K-1 -> J m-1 s-1 K-1
+        a_w = a_w * 1000 / 3600 # kJ m-2 h-1 K-1 -> J m-2 s-1 K-1
 
         # Calculate derivative of the heat balance
-        Kp, H_R = self.calculate_thermo_properties(self.temperature)
-        s_H = -torch.sum((H_R*1e3)*(r_total)*self.rho_b, dim=1, keepdim=True)
-        s_H = s_H.view(int(len(s_H)/self.n_elements), self.n_elements).t()
-        flow_velocity = flow_velocity.view(int(len(flow_velocity)/self.n_elements), self.n_elements).t()
+        _, H_R = self.calculate_thermo_properties(self.temperature) #J
+        s_H = -torch.sum((H_R)*(r_total)*self.rho_b, dim=1, keepdim=True) #J m-3 h-1
+        s_H = s_H / 3600 #J m-3 h-1 -> J m-3 s-1
         
-        dTdz = torch.zeros([self.n_elements, int(len(self.temperature)/self.n_elements)])
-        for i in range(self.n_elements):
-            dr = radii_elements[i+1,:]-radii_elements[i,:]
-            # Calculation of the source term for external heat exchange
-            dTdz_cond = (radii_elements[i,:]*heat_flow_rate[i,:]*1e3 - radii_elements[i+1,:]*heat_flow_rate[i+1,:]*1e3)/ \
-                (dr *(radii_elements[i,:]+dr*0.5)*mult_density_gas_cp[i,:]*flow_velocity[i,:]*3.600)
-            # Calculation of the source term for the reaction
-            dTdz_react = s_H[i,:]/(mult_density_gas_cp[i,:]*flow_velocity[i,:]*3.600)
-            dTdz[i,:] = dTdz_cond+dTdz_react           
-        
-        dTdz = torch.reshape(dTdz.t(), (dTdz.shape[1]*self.n_elements, 1))
-        return dTdz
+        return s_H, lambda_rad, a_w, density_gas, cp_gas 
     
     def calc_IC_loss(self, y_pred, x):
         """
@@ -1314,14 +1278,17 @@ class PINN_loss(torch.nn.Module):
             x (tensor): Input values. Here reactor length [m].
         """
         
+        #find positions where z = 0
+        index_initial = torch.where(x[:,0] == 0)[0]
+
         # Calculation of the mean square displacement between the predicted and 
         # original initial conditions
-        loss_IC_CH4 = (torch.sum(y_pred[0:self.n_elements, 0]) - self.n_CH4_0)**2
-        loss_IC_H2O = (torch.sum(y_pred[0:self.n_elements, 1]) - self.n_H2O_0)**2
-        loss_IC_H2 = (torch.sum(y_pred[0:self.n_elements, 2]) - self.n_H2_0)**2
-        loss_IC_CO = (torch.sum(y_pred[0:self.n_elements, 3]) - self.n_CO_0)**2
-        loss_IC_CO2 = (torch.sum(y_pred[0:self.n_elements, 4]) - self.n_CO2_0)**2
-        loss_IC_T = (torch.mean(y_pred[0:self.n_elements, 5]) - self.T0)**2
+        loss_IC_CH4 = (torch.sum((y_pred[index_initial, 0] - self.n_CH4_0)**2)) #kmol h-1
+        loss_IC_H2O = (torch.sum((y_pred[index_initial, 1] - self.n_H2O_0)**2))
+        loss_IC_H2 = (torch.sum((y_pred[index_initial, 2] - self.n_H2_0)**2))
+        loss_IC_CO = (torch.sum((y_pred[index_initial, 3] - self.n_CO_0)**2))
+        loss_IC_CO2 = (torch.sum((y_pred[index_initial,4] - self.n_CO2_0)**2))
+        loss_IC_T = (torch.mean((y_pred[index_initial, 5] - self.T0)**2))
         
         return [loss_IC_CH4, loss_IC_H2O, loss_IC_H2, loss_IC_CO, loss_IC_CO2, loss_IC_T]
     
@@ -1335,31 +1302,35 @@ class PINN_loss(torch.nn.Module):
             x (tensor): Input values. Here reactor length [m].
         """
         
+        # [:,0] is dx_dz, [:,1] is dx_dr
         ## Calculate the gradients of tensor values
-        dn_dz_CH4 = torch.autograd.grad(outputs=y_pred[:, 0], inputs=x,
-                                grad_outputs=torch.ones_like(y_pred[:, 0]),
-                                retain_graph=True, create_graph=True)[0]
-        dn_dz_H2O = torch.autograd.grad(outputs=y_pred[:, 1], inputs=x,
-                                grad_outputs=torch.ones_like(y_pred[:, 1]),
-                                retain_graph=True, create_graph=True)[0]     
-        dn_dz_H2 = torch.autograd.grad(outputs=y_pred[:, 2], inputs=x,
-                                grad_outputs=torch.ones_like(y_pred[:, 2]),
-                                retain_graph=True, create_graph=True)[0]  
-        dn_dz_CO = torch.autograd.grad(outputs=y_pred[:, 3], inputs=x,
-                                grad_outputs=torch.ones_like(y_pred[:, 3]),
-                                retain_graph=True, create_graph=True)[0]  
-        dn_dz_CO2 = torch.autograd.grad(outputs=y_pred[:, 4], inputs=x,
-                                grad_outputs=torch.ones_like(y_pred[:, 4]),
-                                retain_graph=True, create_graph=True)[0]  
-        dT_dz = torch.autograd.grad(outputs=y_pred[:, 5], inputs=x,
-                                grad_outputs=torch.ones_like(y_pred[:, 5]),
-                                retain_graph=True, create_graph=True)[0]
+        dc_dz_CH4 = torch.autograd.grad(outputs=self.concentrations[:, 0], inputs=x,
+                                grad_outputs=torch.ones_like(self.concentrations[:, 0]),
+                                retain_graph=True, create_graph=True)[0][:,0].unsqueeze(1)
+        dc_dz_H2O = torch.autograd.grad(outputs=self.concentrations[:, 1], inputs=x,
+                                grad_outputs=torch.ones_like(self.concentrations[:, 1]),
+                                retain_graph=True, create_graph=True)[0][:,0].unsqueeze(1)    
+        dc_dz_H2 = torch.autograd.grad(outputs=self.concentrations[:, 2], inputs=x,
+                                grad_outputs=torch.ones_like(self.concentrations[:, 2]),
+                                retain_graph=True, create_graph=True)[0][:,0].unsqueeze(1)  
+        dc_dz_CO = torch.autograd.grad(outputs=self.concentrations[:, 3], inputs=x,
+                                grad_outputs=torch.ones_like(self.concentrations[:, 3]),
+                                retain_graph=True, create_graph=True)[0][:,0].unsqueeze(1) 
+        dc_dz_CO2 = torch.autograd.grad(outputs=self.concentrations[:, 4], inputs=x,
+                                grad_outputs=torch.ones_like(self.concentrations[:, 4]),
+                                retain_graph=True, create_graph=True)[0][:,0].unsqueeze(1)
+        dT_dz = torch.autograd.grad(outputs=self.temperature, inputs=x,
+                                grad_outputs=torch.ones_like(self.temperature),
+                                retain_graph=True, create_graph=True)[0][:,0].unsqueeze(1)
+        dT_dr = torch.autograd.grad(outputs=self.temperature, inputs=x,
+                                grad_outputs=torch.ones_like(self.temperature),
+                                retain_graph=True, create_graph=True)[0][:,1].unsqueeze(1)
+        dT2_dr2 = torch.autograd.grad(outputs=dT_dr, inputs=x,
+                                grad_outputs=torch.ones_like(dT_dr),
+                                retain_graph=True, create_graph=True)[0][:,1].unsqueeze(1)
         
         ## Calculate the differentials
-        # Calculate the mole fractions
-        mole_fractions = torch.cat([y_pred[:,:5], (self.n_N2_0/self.n_elements)*torch.ones(len(y_pred), 1)], dim=1)/ \
-            torch.sum(torch.cat([y_pred[:,:5], (self.n_N2_0/self.n_elements)*torch.ones(len(y_pred), 1)], dim=1), dim=1).view(-1, 1)
-        
+
         """
         #!!!!!!!!Diesen Bereich später löschen!!!!!!!!
         mole_fractions[:,0] = 0.2128
@@ -1371,53 +1342,60 @@ class PINN_loss(torch.nn.Module):
         self.temperature[:] = 793
         #!!!!!!!!
         """
-        
         # Calculate partial pressures
-        partial_pressures = self.p * 1e5 * mole_fractions
-        
-        # Calculate the element area and radii with darcy's law
-        area_elements, radii_elements = PINN_loss.calc_area_radii(self, mole_fractions)
-
-        # Consider dependence of temperature and gas composition of the flow velocity
-        flow_velocity = PINN_loss.calc_flow_velocity(self, mole_fractions, area_elements)
+        partial_pressures = self.p * 1e5 * self.mole_fractions
         
         # Calculate the differentials from the mass balance
-        dn_dz_pred, r_total_pred = PINN_loss.xu_froment(self, partial_pressures, area_elements)
+        dc_dz_pred, r_total_pred = PINN_loss.xu_froment(self, partial_pressures)
         
         # Calculate the differential from the heat balance
-        dT_dz_pred = PINN_loss.heat_balance(self, mole_fractions, r_total_pred, flow_velocity, radii_elements)
+        s_H, lambda_rad, a_w, density_gas, cp_gas  = PINN_loss.heat_balance(self, r_total_pred)
         
+        #find index where r is not equal to 0
+        index_not_center = torch.where(x[:,1] != 0)[0]
+
         ## Calculation of the mean square displacement between the gradients of 
         ## autograd and differentials of the mass/ heat balance
-        loss_GE_CH4 = (dn_dz_CH4 - dn_dz_pred[:,0].unsqueeze(1))**2
-        loss_GE_H2O = (dn_dz_H2O - dn_dz_pred[:,1].unsqueeze(1))**2
-        loss_GE_H2 = (dn_dz_H2 - dn_dz_pred[:,2].unsqueeze(1))**2
-        loss_GE_CO = (dn_dz_CO - dn_dz_pred[:,3].unsqueeze(1))**2
-        loss_GE_CO2 = (dn_dz_CO2 - dn_dz_pred[:,4].unsqueeze(1))**2
-        loss_GE_T = (dT_dz - dT_dz_pred)**2
+        loss_GE_CH4 = (-self.flow_velocity * dc_dz_CH4 - dc_dz_pred[:,0].unsqueeze(1))**2
+        loss_GE_H2O = (-self.flow_velocity * dc_dz_H2O - dc_dz_pred[:,1].unsqueeze(1))**2
+        loss_GE_H2 = (-self.flow_velocity * dc_dz_H2 - dc_dz_pred[:,2].unsqueeze(1))**2
+        loss_GE_CO = (-self.flow_velocity * dc_dz_CO - dc_dz_pred[:,3].unsqueeze(1))**2
+        loss_GE_CO2 = (-self.flow_velocity * dc_dz_CO2 - dc_dz_pred[:,4].unsqueeze(1))**2
+        loss_GE_T = (lambda_rad[index_not_center]*(dT2_dr2[index_not_center] + 1/x[index_not_center,1].unsqueeze(1)*dT_dr[index_not_center]) - self.flow_velocity[index_not_center]*density_gas[index_not_center]*cp_gas[index_not_center] * dT_dz[index_not_center] + s_H[index_not_center])**2
         
         return [loss_GE_CH4, loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, loss_GE_T]
     
     def calc_BC_loss(self, y_pred, x):
-        # Use the heat flow rate from the calculation of dTdz from GE
-        dq_dt_center = torch.autograd.grad(outputs=self.heat_flow_rate[0,:], inputs=x,
-                                grad_outputs=torch.ones_like(self.heat_flow_rate[0,:]),
-                                retain_graph=True, create_graph=True)[0]
-        dq_dt_wall = torch.autograd.grad(outputs=self.heat_flow_rate[-1,:], inputs=x,
-                                grad_outputs=torch.ones_like(self.heat_flow_rate[-1,:]),
-                                retain_graph=True, create_graph=True)[0]  
-
-        # Calculation of losses
-        loss_BC_center = (dq_dt_center[::self.n_elements] - self.heat_flow_rate[0,:].unsqueeze(1))**2
-        loss_BC_wall = (dq_dt_wall[::self.n_elements] - self.heat_flow_rate[-1,:].unsqueeze(1))**2
+        # Calculate partial pressures
+        partial_pressures = self.p * 1e5 * self.mole_fractions
         
+        # Calculate the differentials from the mass balance
+        _, r_total_pred = PINN_loss.xu_froment(self, partial_pressures)
+        
+        # Calculate the differential from the heat balance
+        _, lambda_rad, a_w, _, _  = PINN_loss.heat_balance(self, r_total_pred)
+        
+        dT_dr = torch.autograd.grad(outputs=self.temperature, inputs=x,
+                                grad_outputs=torch.ones_like(self.temperature),
+                                retain_graph=True, create_graph=True)[0][:,1].unsqueeze(1)
+        
+        #find radii where r = 0
+        index_center = torch.where(x[:,1] == 0)[0]
+
+        #find radii where r = r_out
+        index_wall = torch.where(x[:,1] == self.d_in/2)[0]
+
+        loss_BC_center = (dT_dr[index_center])**2
+
+        loss_BC_wall = (dT_dr[index_wall] - a_w[index_wall] / lambda_rad[index_wall] * (self.temperature[index_wall] - self.T_wall))**2
+
         return [loss_BC_center, loss_BC_wall]
         
         
     def causal_training(self, x, loss_IC_CH4, loss_IC_H2O, loss_IC_H2, \
                         loss_IC_CO, loss_IC_CO2, loss_IC_T, loss_GE_CH4, \
                         loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, \
-                        loss_GE_T):
+                        loss_GE_T, loss_BC_center, loss_BC_wall):
         """
         Previously, we used torch.mean() to average all the losses and the 
         neural network tried to reduce the gradient of all the points equally. 
@@ -1429,25 +1407,36 @@ class PINN_loss(torch.nn.Module):
         this reason, the prediction by the neural network has so far been very 
         good at the beginning and very bad at the end of the points. 
         """
-        
-        # Form the sum of the losses
-        losses = torch.zeros_like(x)
-        losses[0:self.n_elements] = loss_IC_CH4 + loss_IC_H2O + loss_IC_H2 + loss_IC_CO + \
-            loss_IC_CO2 + loss_IC_T + loss_GE_CH4[0:self.n_elements] + loss_GE_H2O[0:self.n_elements] + \
-                loss_GE_H2[0:self.n_elements] + loss_GE_CO[0:self.n_elements] + loss_GE_CO2[0:self.n_elements] + loss_GE_T[0:self.n_elements]
-        losses[self.n_elements:] = loss_GE_CH4[self.n_elements:] + loss_GE_H2O[self.n_elements:] + loss_GE_H2[self.n_elements:] + \
-            loss_GE_CO[self.n_elements:] + loss_GE_CO2[self.n_elements:] + loss_GE_T[self.n_elements:]
-        
+
+        x = x.detach().numpy()
+
+        #make 1D tensor of z coordinates for each point
+        z_pos = len(np.unique(x[:, 0]))
+        r_pos = len(np.unique(x[:, 1]))
+        all_loss = torch.zeros(z_pos+1, 1)
+
+        IC_loss = torch.sum(loss_IC_CH4 + loss_IC_H2O + loss_IC_H2 + loss_IC_CO + \
+                            loss_IC_CO2 + loss_IC_T)
+        all_loss[0] = IC_loss
+
+        #add up the GE losses, again aggregated by z coordinate
+        GE_loss_c = torch.sum(loss_GE_CH4 + loss_GE_H2O + loss_GE_H2 + loss_GE_CO + \
+                            loss_GE_CO2, dim=1).reshape(z_pos,r_pos)
+
         # Calculate the weighting factors of the losses
-        weight_factors = torch.zeros([int(losses.size(0)/self.n_elements)])
-        for i in range(weight_factors.size(0)):
-            w_i = torch.exp(-self.causality_parameter*torch.sum(losses[0:(i+1)*self.n_elements]))
+        GE_loss_T = loss_GE_T.reshape(z_pos,r_pos-1)
+
+        all_loss[1:] += torch.sum(GE_loss_c,dim=1).unsqueeze(1) + torch.sum(GE_loss_T,dim=1).unsqueeze(1)
+
+        weight_factors = torch.zeros(all_loss.size(0))
+        weight_factors[0] = 1
+        for i in range(1,weight_factors.size(0)):
+            w_i = torch.exp(-self.causality_parameter*torch.sum(all_loss[0:(i)]))
             weight_factors[i] = w_i
-        weight_factors = weight_factors.repeat_interleave(self.n_elements)
         self.weight_factors = weight_factors
 
         # Consider the weighting factors in the losses
-        total_loss = torch.mean(weight_factors * losses)
+        total_loss = torch.mean(weight_factors.unsqueeze(1) * all_loss)
             
         return total_loss
          
@@ -1456,16 +1445,22 @@ class PINN_loss(torch.nn.Module):
         Calculation of the total loss.
         
         Args:
-            x (tensor): Input values. Here reactor length [m].
-            y (tensor): Training data. Here ammount of substances from all species [kmol h-1]
+            x (tensor): Input values. Here reactor length z and radial position r [m].
+            y (tensor): Training data. Here concentration from all species [kmol m^3]
                         and the temperature in the reactor [K].
-            y_pred (tensor): Predicted output. Here ammount of substances from all 
-                             species [kmol h-1] and the temperature in the reactor [K].
+            y_pred (tensor): Predicted output. Concentration from all species [kmol m^3] and the temperature in the reactor [K].
         """
         
         # Extract temperature
         self.temperature = y_pred[:, 5].reshape(-1, 1)
         
+        # Calculate molar flows from reactor cross section area, flow velocity, and concentration
+        # Append N2 moleflow 
+        self.mole_flows = torch.cat([y_pred[:, :5], (self.n_N2_0)*torch.ones(len(y_pred), 1)], dim=1) #in kmol h^-1
+        self.mole_fractions = self.mole_flows / torch.sum(self.mole_flows, dim=1).unsqueeze(1) 
+        self.flow_velocity = PINN_loss.calc_flow_velocity(self, self.mole_fractions, self.temperature)
+        self.concentrations = self.mole_flows / 3600 / (self.flow_velocity * self.A) #in kmol/m^3
+
         # Calculation of the total loss
         loss_IC_CH4, loss_IC_H2O, loss_IC_H2, loss_IC_CO, \
             loss_IC_CO2, loss_IC_T = self.calc_IC_loss(y_pred, x)
@@ -1485,7 +1480,9 @@ class PINN_loss(torch.nn.Module):
                                    np.mean(loss_GE_H2.detach().numpy()), \
                                    np.mean(loss_GE_CO.detach().numpy()), \
                                    np.mean(loss_GE_CO2.detach().numpy()), \
-                                   np.mean(loss_GE_T.detach().numpy())])
+                                   np.mean(loss_GE_T.detach().numpy()), \
+                                   np.mean(loss_BC_center.detach().numpy()), \
+                                   np.mean(loss_BC_wall.detach().numpy())])
 
         # Consider weighting factors of the loss functions
         loss_IC_CH4 = self.w_IC_n * self.w_n * loss_IC_CH4
@@ -1500,6 +1497,8 @@ class PINN_loss(torch.nn.Module):
         loss_GE_CO = self.w_GE_n * self.w_n * loss_GE_CO
         loss_GE_CO2 = self.w_GE_n * self.w_n * loss_GE_CO2
         loss_GE_T = self.w_GE_T * self.w_T * loss_GE_T
+        loss_BC_center = self.w_BC_T *self.w_T * loss_BC_center
+        loss_BC_wall = self.w_BC_T *self.w_T * loss_BC_wall
         
         # Store losses after weighting
         losses_after_weighting = np.array([np.mean(loss_IC_CH4.detach().numpy()), \
@@ -1513,12 +1512,15 @@ class PINN_loss(torch.nn.Module):
                                    np.mean(loss_GE_H2.detach().numpy()), \
                                    np.mean(loss_GE_CO.detach().numpy()), \
                                    np.mean(loss_GE_CO2.detach().numpy()), \
-                                   np.mean(loss_GE_T.detach().numpy())])
+                                   np.mean(loss_GE_T.detach().numpy()),\
+                                   np.mean(loss_BC_center.detach().numpy()), \
+                                   np.mean(loss_BC_wall.detach().numpy())])
         
         # Calculate the total loss
         total_loss = PINN_loss.causal_training(self, x, loss_IC_CH4, loss_IC_H2O, \
                         loss_IC_H2, loss_IC_CO, loss_IC_CO2, loss_IC_T, loss_GE_CH4, \
-                            loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, loss_GE_T)
+                        loss_GE_H2O, loss_GE_H2, loss_GE_CO, loss_GE_CO2, loss_GE_T, 	
+                        loss_BC_center, loss_BC_wall)
         
         return [total_loss, losses_before_weighting, losses_after_weighting]
 
@@ -1537,11 +1539,11 @@ def train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, analyt
         # Compute loss
         total_loss, losses_before_weighting, losses_after_weighting = \
             calc_loss(x, y, ypred)
-        
+
         # Backward pass
         if total_loss.requires_grad:
             total_loss.backward()
-
+        
         return total_loss
     
     def prepare_plots_folder():
@@ -1573,7 +1575,7 @@ def train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, analyt
         
         print(f"Der Ordner '{folder_name}' wurde überprüft und gegebenenfalls erstellt bzw. geleert.")
     
-    def calc_results(y_pred, n_elements):
+    def calc_results(y_pred,x):
         """
         Calculate the 
         
@@ -1591,24 +1593,34 @@ def train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, analyt
                               elements as a function of reactor length [K]
         """
         
-        # Calculate mole fractions
-        x_CH4 = np.sum(y_pred[:,0].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
-        x_H2O = np.sum(y_pred[:,1].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
-        x_H2 = np.sum(y_pred[:,2].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
-        x_CO = np.sum(y_pred[:,3].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
-        x_CO2 = np.sum(y_pred[:,4].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
-        x_N2 = np.sum(y_pred[:,5].reshape(-1, n_elements), axis=1)/np.sum(np.sum(y_pred[:,:6], axis=1).reshape(-1, n_elements), axis=1)
+        #analytical solution: x_CH4_avg, x_H2O_avg, x_H2_avg, x_CO_avg, x_CO2_avg, x_N2_avg, X_CH4, Y_CO2, T_avg
+        x = x.detach().numpy()
+
+        # Reshape to 3D tensor
+        z_pos = len(np.unique(x[:, 0]))
+        entry = y_pred.shape[1]
+
+        y_pred = y_pred.reshape(z_pos, -1, entry) #position, radius, species
+
+        #refactor to accomadate for x and r coordinates training
+        # Calculate mole fractions #potentially wrong
+        x_CH4 = np.mean(y_pred[:,:,0], axis=1)/np.sum(np.mean(y_pred[:,:,:6], axis=1),axis=1)
+        x_H2O = np.mean(y_pred[:,:,1], axis=1)/np.sum(np.mean(y_pred[:,:,:6], axis=1),axis=1)
+        x_H2 = np.mean(y_pred[:,:,2], axis=1)/np.sum(np.mean(y_pred[:,:,:6], axis=1),axis=1)
+        x_CO = np.mean(y_pred[:,:,3], axis=1)/np.sum(np.mean(y_pred[:,:,:6], axis=1),axis=1)
+        x_CO2 = np.mean(y_pred[:,:,4], axis=1)/np.sum(np.mean(y_pred[:,:,:6], axis=1),axis=1)
+        x_N2 = np.mean(y_pred[:,:,5], axis=1)/np.sum(np.mean(y_pred[:,:,:6], axis=1),axis=1)
         
         # Calculate conversion of CH4
-        X_CH4 = (np.sum(y_pred[:n_elements,0])-np.sum(y_pred[:,0].reshape(-1, n_elements), axis=1)) / \
-            np.sum(y_pred[:n_elements,0])
+        X_CH4 = np.zeros(x_H2.shape[0],)#(np.sum(y_pred[:n_elements,0])-np.sum(y_pred[:,0].reshape(-1, n_elements), axis=1)) / \
+            #np.sum(y_pred[:n_elements,0])
         
         # Calculate yield of CO2
-        Y_CO2 = (np.sum(y_pred[:,4].reshape(-1, n_elements), axis=1)-np.sum(y_pred[:n_elements,4])) / \
-            np.sum(y_pred[:n_elements,0])
+        Y_CO2 = np.zeros(x_H2.shape[0],)#(np.sum(y_pred[:,4].reshape(-1, n_elements), axis=1)-np.sum(y_pred[:n_elements,4])) / \
+            #np.sum(y_pred[:n_elements,0])
             
         # Calculate temperature
-        T_avg = np.sum(y_pred[:,6].reshape(-1, n_elements),axis=1)/n_elements
+        T_avg = np.mean(y_pred[:,:,-1], axis=1)
         
         return np.column_stack((x_CH4, x_H2O, x_H2, x_CO, x_CO2, x_N2, X_CH4, Y_CO2, T_avg))
         
@@ -1632,8 +1644,8 @@ def train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, analyt
         # in order to print them in the console afterwards and plot them.
         total_loss, losses_before_weighting, losses_after_weighting = \
             calc_loss(x, y, network(x))
-        loss_values[epoch,:] = np.hstack((np.array(total_loss.detach().numpy()),\
-                                          losses_before_weighting,losses_after_weighting))
+        #loss_values[epoch,:] = np.hstack((np.array(total_loss.detach().numpy()),\
+        #                                  losses_before_weighting,losses_after_weighting))
             
         end_time = time.time()
         execution_time = end_time - start_time
@@ -1648,11 +1660,11 @@ def train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, analyt
             y_pred = y_pred.detach().numpy()
             y_pred = np.insert(y_pred, 5, n_N2_0, axis=1)
             
-            predicted_solution = calc_results(y_pred, n_elements)
+            predicted_solution = calc_results(y_pred,x)
             
             # Plot ammount of substances, temperature and weight factors
             plots(reactor_lengths, analytical_solution, predicted_solution, n_elements, save_plot=True, \
-                        plt_num=epoch+1, weight_factors=calc_loss.weight_factors)
+                        plt_num=epoch+1)
     
     ## Create final plots
     # Predict ammount of substances an temperature with the neural network
@@ -1660,11 +1672,11 @@ def train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, analyt
     y_pred = y_pred.detach().numpy()
     y_pred = np.insert(y_pred, 5, n_N2_0, axis=1)
     
-    predicted_solution = calc_results(y_pred, n_elements)
+    predicted_solution = calc_results(y_pred, x)
     
     # Plot ammount of substances, temperature and weight factors
     plots(reactor_lengths, analytical_solution, predicted_solution, n_elements, save_plot = True, \
-                plt_num = f'{num_epochs}_final', weight_factors = calc_loss.weight_factors, loss_values=loss_values)
+                plt_num = f'{num_epochs}_final')
        
 
 def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
@@ -1728,7 +1740,7 @@ def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
        
     # Plot weighting factors from causal training
     if weight_factors is not None:
-        weight_factors_plot = np.mean(weight_factors.detach().numpy().reshape(-1, n_elements), axis=1)
+        weight_factors_plot = weight_factors.detach().numpy()[1:] #exclude IC weight
         
         plt.figure()
         plt.plot(reactor_lengths, weight_factors_plot, 'r-', \
@@ -1799,22 +1811,27 @@ def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
 
         
 if __name__ == "__main__":
+    #torch.autograd.set_detect_anomaly(True)
+
+    #todo: do without temp coupling, give the temperature! use temperature from true solution, only debug mole flows first
+
     # Define parameters for the model
-    reactor_lengths = np.linspace(0,12,num=200)
+    reactor_lengths = np.linspace(0,12,num=10)
+    reactor_radii = np.linspace(0,0.1016/2,num=11)
     inlet_mole_fractions = [0.2128,0.714,0.0259,0.0004,0.0119,0.035] #CH4,H20,H2,CO,CO2,N2
     bound_conds = [25.7,2.14,793,1100] #p,u_in,T_in,T_wall
     reactor_conds = [0.007, 10] #eta, n_elements
     
     plot_analytical_solution = False #True,False
     
-    input_size_NN = 1
+    input_size_NN = 2 #z and r
     hidden_size_NN = 32
     output_size_NN = 6
     num_layers_NN = 3
     num_epochs = 1000
-    weight_factors = [1,1,1,1,1e+2,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
-    epsilon = 5e-8 #epsilon=0: old model, epsilon!=0: new model
-    plot_interval = 10 # Plotting during NN-training
+    weight_factors = [1,1,1,0,1,1,0] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T,w_BC_T
+    epsilon = 1 #epsilon=0: old model, epsilon!=0: new model
+    plot_interval = 1 # Plotting during NN-training
     
     # Calculation of the analytical curves
     model = generate_data(inlet_mole_fractions, bound_conds, reactor_conds)
@@ -1828,11 +1845,14 @@ if __name__ == "__main__":
     network = NeuralNetwork(input_size_NN=input_size_NN, hidden_size_NN=hidden_size_NN,\
                             output_size_NN=output_size_NN, num_layers_NN=num_layers_NN,\
                             T0 = bound_conds[2])
+    
     optimizer = torch.optim.LBFGS(network.parameters(), lr=1, line_search_fn= \
-                                  "strong_wolfe", max_eval=None, tolerance_grad \
-                                      =1e-50, tolerance_change=1e-50)
+                                   "strong_wolfe", max_eval=None, tolerance_grad \
+                                       =1e-50, tolerance_change=1e-50)
         
-    x = torch.tensor(np.repeat(reactor_lengths, reactor_conds[1]).reshape(-1, 1), requires_grad=True)
+    #x = torch.tensor(np.repeat(reactor_lengths, reactor_conds[1]).reshape(-1, 1), requires_grad=True)
+    #combine reactor lengths and radii
+    x = torch.tensor(np.array([[i,j] for i in reactor_lengths for j in reactor_radii]), requires_grad=True)
     y = None
     
     # Train the neural network
