@@ -322,16 +322,16 @@ class generate_data():
         # Calculation of standard reaction enthalpies with Satz von Hess at 
         # standard conditions (T = 298.15 K)
         H_R = np.zeros(3)
-        H_R[0] = -H_i[0] - H_i[1] + H_i[3] + 3*H_i[2]
-        H_R[1] = -H_i[3] - H_i[1] + H_i[4] + H_i[2]
-        H_R[2] = -H_i[0] - 2*H_i[1] + H_i[4] + 4*H_i[2]
+        H_R[0] = -H_i[0].item() - H_i[1].item() + H_i[3].item() + 3*H_i[2].item()
+        H_R[1] = -H_i[3].item() - H_i[1].item() + H_i[4].item() + H_i[2].item()
+        H_R[2] = -H_i[0].item() - 2*H_i[1].item() + H_i[4].item() + 4*H_i[2].item()
         
         # Calculation of standard reaction entropies with Satz von Hess at 
         # standard conditions (T = 298.15 K)
         S_R = np.zeros(3)
-        S_R[0] = -S_i[0] - S_i[1] + S_i[3] + 3*S_i[2]
-        S_R[1] = -S_i[3] - S_i[1] + S_i[4] + S_i[2]
-        S_R[2] = -S_i[0] - 2*S_i[1] + S_i[4] + 4*S_i[2]
+        S_R[0] = -S_i[0].item() - S_i[1].item() + S_i[3].item() + 3*S_i[2].item()
+        S_R[1] = -S_i[3].item() - S_i[1].item() + S_i[4].item() + S_i[2].item()
+        S_R[2] = -S_i[0].item() - 2*S_i[1].item() + S_i[4].item() + 4*S_i[2].item()
         
         # Calculation of the free reaction enthalpy with the Gibbs Helmoltz equation
         G_R = H_R - T * S_R
@@ -389,11 +389,11 @@ class generate_data():
             
             # Calculate derivatives of the mass balance
             dn_dz_element = np.zeros(6)
-            dn_dz_element[0] = self.eta * area_elements[i] * (-r_total_element[0] - r_total_element[2]) * self.rho_b
-            dn_dz_element[1] = self.eta * area_elements[i] * (-r_total_element[0] - r_total_element[1] - 2*r_total_element[2]) * self.rho_b
-            dn_dz_element[2] = self.eta * area_elements[i] * (3*r_total_element[0] + r_total_element[1] + 4*r_total_element[2]) * self.rho_b
-            dn_dz_element[3] = self.eta * area_elements[i] * (r_total_element[0] - r_total_element[1]) * self.rho_b
-            dn_dz_element[4] = self.eta * area_elements[i] * (r_total_element[1] + r_total_element[2]) * self.rho_b
+            dn_dz_element[0] = self.eta * area_elements[i].item() * (-r_total_element[0] - r_total_element[2]) * self.rho_b
+            dn_dz_element[1] = self.eta * area_elements[i].item() * (-r_total_element[0] - r_total_element[1] - 2*r_total_element[2]) * self.rho_b
+            dn_dz_element[2] = self.eta * area_elements[i].item() * (3*r_total_element[0] + r_total_element[1] + 4*r_total_element[2]) * self.rho_b
+            dn_dz_element[3] = self.eta * area_elements[i].item() * (r_total_element[0] - r_total_element[1]) * self.rho_b
+            dn_dz_element[4] = self.eta * area_elements[i].item() * (r_total_element[1] + r_total_element[2]) * self.rho_b
             dn_dz_element[5] = 0
             
             dn_dz[i::self.n_elements] = np.expand_dims(dn_dz_element, axis=1)
@@ -1356,7 +1356,7 @@ class PINN_loss(torch.nn.Module):
                                 retain_graph=True, create_graph=True)[0]
         
         ## Calculate the differentials
-        # Calculate the mole fractions
+        # Calculate the mole fractions     
         mole_fractions = torch.cat([y_pred[:,:5], (self.n_N2_0/self.n_elements)*torch.ones(len(y_pred), 1)], dim=1)/ \
             torch.sum(torch.cat([y_pred[:,:5], (self.n_N2_0/self.n_elements)*torch.ones(len(y_pred), 1)], dim=1), dim=1).view(-1, 1)
         
@@ -1747,19 +1747,19 @@ def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
     if loss_values is not None:
         plt.figure()
         epochs = list(range(1, len(loss_values)+1))
-        plt.plot(epochs, loss_values[:,0], '-', label=r'$L_{\rm{total}}$')
-        plt.plot(epochs, loss_values[:,1], '-', label=r'$L_{\rm{IC,CH_{4}}}$')
-        plt.plot(epochs, loss_values[:,2], '-', label=r'$L_{\rm{IC,H_{2}O}}$')
-        plt.plot(epochs, loss_values[:,3], '-', label=r'$L_{\rm{IC,H_{2}}}$')
-        plt.plot(epochs, loss_values[:,4], '-', label=r'$L_{\rm{IC,CO}}$')
-        plt.plot(epochs, loss_values[:,5], '-', label=r'$L_{\rm{IC,CO_{2}}}$')
-        plt.plot(epochs, loss_values[:,6], '-', label=r'$L_{\rm{IC,T}}$')
-        plt.plot(epochs, loss_values[:,7], '--', label=r'$L_{\rm{GE,CH_{4}}}$')
-        plt.plot(epochs, loss_values[:,8], '--', label=r'$L_{\rm{GE,H_{2}O}}$')
-        plt.plot(epochs, loss_values[:,9], '--', label=r'$L_{\rm{GE,H_{2}}}$')
-        plt.plot(epochs, loss_values[:,10], '--', label=r'$L_{\rm{GE,CO}}$')
-        plt.plot(epochs, loss_values[:,11], '--', label=r'$L_{\rm{GE,CO_{2}}}$')
-        plt.plot(epochs, loss_values[:,12], '--', label=r'$L_{\rm{GE,T}}$')
+        plt.plot(epochs, loss_values[:,0], '-', color='black', label=r'$L_{\rm{total}}$')
+        plt.plot(epochs, loss_values[:,1], '-', color='tab:blue', label=r'$L_{\rm{IC,CH_{4}}}$')
+        plt.plot(epochs, loss_values[:,2], '-', color='tab:orange', label=r'$L_{\rm{IC,H_{2}O}}$')
+        plt.plot(epochs, loss_values[:,3], '-', color='tab:green', label=r'$L_{\rm{IC,H_{2}}}$')
+        plt.plot(epochs, loss_values[:,4], '-', color='tab:red', label=r'$L_{\rm{IC,CO}}$')
+        plt.plot(epochs, loss_values[:,5], '-', color='tab:purple', label=r'$L_{\rm{IC,CO_{2}}}$')
+        plt.plot(epochs, loss_values[:,6], '-', color='tab:olive', label=r'$L_{\rm{IC,T}}$')
+        plt.plot(epochs, loss_values[:,7], '--', color='tab:blue', label=r'$L_{\rm{GE,CH_{4}}}$')
+        plt.plot(epochs, loss_values[:,8], '--', color='tab:orange', label=r'$L_{\rm{GE,H_{2}O}}$')
+        plt.plot(epochs, loss_values[:,9], '--', color='tab:green', label=r'$L_{\rm{GE,H_{2}}}$')
+        plt.plot(epochs, loss_values[:,10], '--', color='tab:red', label=r'$L_{\rm{GE,CO}}$')
+        plt.plot(epochs, loss_values[:,11], '--', color='tab:purple', label=r'$L_{\rm{GE,CO_{2}}}$')
+        plt.plot(epochs, loss_values[:,12], '--', color='tab:olive', label=r'$L_{\rm{GE,T}}$')
         
         plt.xlabel(r'$Number\:of\:epochs$')
         plt.ylabel(r'$losses$')
@@ -1773,19 +1773,19 @@ def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
         
         plt.figure()
         epochs = list(range(1, len(loss_values)+1))
-        plt.plot(epochs, loss_values[:,0], '-', label=r'$L_{\rm{total}}$')
-        plt.plot(epochs, loss_values[:,13], '-', label=r'$L_{\rm{IC,CH_{4}}}$')
-        plt.plot(epochs, loss_values[:,14], '-', label=r'$L_{\rm{IC,H_{2}O}}$')
-        plt.plot(epochs, loss_values[:,15], '-', label=r'$L_{\rm{IC,H_{2}}}$')
-        plt.plot(epochs, loss_values[:,16], '-', label=r'$L_{\rm{IC,CO}}$')
-        plt.plot(epochs, loss_values[:,17], '-', label=r'$L_{\rm{IC,CO_{2}}}$')
-        plt.plot(epochs, loss_values[:,18], '-', label=r'$L_{\rm{IC,T}}$')
-        plt.plot(epochs, loss_values[:,19], '--', label=r'$L_{\rm{GE,CH_{4}}}$')
-        plt.plot(epochs, loss_values[:,20], '--', label=r'$L_{\rm{GE,H_{2}O}}$')
-        plt.plot(epochs, loss_values[:,21], '--', label=r'$L_{\rm{GE,H_{2}}}$')
-        plt.plot(epochs, loss_values[:,22], '--', label=r'$L_{\rm{GE,CO}}$')
-        plt.plot(epochs, loss_values[:,23], '--', label=r'$L_{\rm{GE,CO_{2}}}$')
-        plt.plot(epochs, loss_values[:,24], '--', label=r'$L_{\rm{GE,T}}$')
+        plt.plot(epochs, loss_values[:,0], '-', color='black', label=r'$L_{\rm{total}}$')
+        plt.plot(epochs, loss_values[:,13], '-', color='tab:blue', label=r'$L_{\rm{IC,CH_{4}}}$')
+        plt.plot(epochs, loss_values[:,14], '-', color='tab:orange', label=r'$L_{\rm{IC,H_{2}O}}$')
+        plt.plot(epochs, loss_values[:,15], '-', color='tab:green', label=r'$L_{\rm{IC,H_{2}}}$')
+        plt.plot(epochs, loss_values[:,16], '-', color='tab:red', label=r'$L_{\rm{IC,CO}}$')
+        plt.plot(epochs, loss_values[:,17], '-', color='tab:purple', label=r'$L_{\rm{IC,CO_{2}}}$')
+        plt.plot(epochs, loss_values[:,18], '-', color='tab:olive', label=r'$L_{\rm{IC,T}}$')
+        plt.plot(epochs, loss_values[:,19], '--', color='tab:blue', label=r'$L_{\rm{GE,CH_{4}}}$')
+        plt.plot(epochs, loss_values[:,20], '--', color='tab:orange', label=r'$L_{\rm{GE,H_{2}O}}$')
+        plt.plot(epochs, loss_values[:,21], '--', color='tab:green', label=r'$L_{\rm{GE,H_{2}}}$')
+        plt.plot(epochs, loss_values[:,22], '--', color='tab:red', label=r'$L_{\rm{GE,CO}}$')
+        plt.plot(epochs, loss_values[:,23], '--', color='tab:purple', label=r'$L_{\rm{GE,CO_{2}}}$')
+        plt.plot(epochs, loss_values[:,24], '--', color='tab:olive', label=r'$L_{\rm{GE,T}}$')
         
         plt.xlabel(r'$Number\:of\:epochs$')
         plt.ylabel(r'$losses$')
@@ -1811,9 +1811,9 @@ if __name__ == "__main__":
     hidden_size_NN = 32
     output_size_NN = 6
     num_layers_NN = 3
-    num_epochs = 1000
+    num_epochs = 10
     weight_factors = [1,1,1,1,1e+2,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
-    epsilon = 5e-8 #epsilon=0: old model, epsilon!=0: new model
+    epsilon = 0 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training
     
     # Calculation of the analytical curves
