@@ -1266,6 +1266,14 @@ class PINN_loss(torch.nn.Module):
         # Calculate heat transfer
         alpha_w_int, lambda_rad = calc_heat_transfer(self.temperature,\
                 mole_fractions, density_gas, cp_i, flow_velocity)
+            
+        """
+        #!!!! später entfernen!!!
+        alpha_w_int = torch.full((1000,1), 4737.8884769821625)
+        lambda_rad = torch.full((1000,1), 122.78596899483958)
+        #!!!!
+        """
+        
         alpha_w_int = alpha_w_int.view(int(len(alpha_w_int)/self.n_elements), self.n_elements).t()
         lambda_rad = lambda_rad.view(int(len(lambda_rad)/self.n_elements), self.n_elements).t()
         temperature = self.temperature.view(int(len(self.temperature)/self.n_elements), self.n_elements).t()
@@ -1472,7 +1480,7 @@ class PINN_loss(torch.nn.Module):
         loss_GE_CH4, loss_GE_H2O, loss_GE_H2, loss_GE_CO, \
             loss_GE_CO2, loss_GE_T = self.calc_GE_loss(y_pred, x)
         loss_BC_center, loss_BC_wall = self.calc_BC_loss(y_pred, x)
-        
+    
         # Store losses before weighting
         losses_before_weighting = np.array([np.mean(loss_IC_CH4.detach().numpy()), \
                                    np.mean(loss_IC_H2O.detach().numpy()), \
@@ -1800,7 +1808,7 @@ def plots(reactor_lengths, analytical_solution, predicted_solution, n_elements,\
         
 if __name__ == "__main__":
     # Define parameters for the model
-    reactor_lengths = np.linspace(0,12,num=200)
+    reactor_lengths = np.linspace(0,12,num=100)
     inlet_mole_fractions = [0.2128,0.714,0.0259,0.0004,0.0119,0.035] #CH4,H20,H2,CO,CO2,N2
     bound_conds = [25.7,2.14,793,1100] #p,u_in,T_in,T_wall
     reactor_conds = [0.007, 10] #eta, n_elements
@@ -1811,9 +1819,9 @@ if __name__ == "__main__":
     hidden_size_NN = 32
     output_size_NN = 6
     num_layers_NN = 3
-    num_epochs = 10
-    weight_factors = [1,1,1,1,1e+2,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
-    epsilon = 0 #epsilon=0: old model, epsilon!=0: new model
+    num_epochs = 50
+    weight_factors = [1,1,1,1,1,1] #w_n,w_T,w_GE_n,w_GE_T,w_IC_n,w_IC_T
+    epsilon = 0 #1e-7 #epsilon=0: old model, epsilon!=0: new model
     plot_interval = 10 # Plotting during NN-training
     
     # Calculation of the analytical curves
