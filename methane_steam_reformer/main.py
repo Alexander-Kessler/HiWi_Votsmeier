@@ -124,7 +124,10 @@ class generate_data():
         self.H_0 = np.array([-74850, -241820, 0, -110540, -393500])
         self.S_0 = np.array([-80.5467, -44.3736, 0,	89.6529, 2.9515])
         self.MW = np.array([16.043, 18.02, 2.016, 28.01, 44.01, 28.01]) * 1e-3
-        
+
+        self.reactor_radii = np.array([[0.],[0.01606437],[0.02271845],[0.02782431],[0.03212874],[0.03592102],[0.03934951],[0.04250233],[0.0454369 ],[0.04819311],[0.0508    ]])
+        self.area_elements = self.reactor_radii[1:]**2 * math.pi - self.reactor_radii[:-1]**2 * math.pi
+
         
     def calc_inlet_ammount_of_substances(self):
         """
@@ -598,7 +601,8 @@ class generate_data():
         # Calculate radii for 2D temperature plot
         radii_2D = np.zeros([self.n_elements+1,len(y)])
         for i in range(len(y)):
-            area_elements, radii_elements = self.calc_area_radii(y[i,6*self.n_elements:], y[i,:6*self.n_elements])
+            #area_elements, radii_elements = self.calc_area_radii(y[i,6*self.n_elements:], y[i,:6*self.n_elements])
+            radii_elements = self.reactor_radii
             radii_2D[:,i] = np.squeeze(radii_elements)
         self.radii_2D = radii_2D
         
@@ -632,7 +636,9 @@ class generate_data():
         partial_pressures = self.p * 1e5 * mole_fractions
         
         # Calculate the element area and radii with darcy's law
-        area_elements, radii_elements = generate_data.calc_area_radii(self, temperature, mole_fractions)
+        #area_elements, radii_elements = generate_data.calc_area_radii(self, temperature, mole_fractions)
+        area_elements = self.area_elements
+        radii_elements = self.reactor_radii
 
         # Calculation of the flow velocity as a function of the gas composition 
         # and temperature
@@ -1810,10 +1816,11 @@ if __name__ == "__main__":
     # Define parameters for the model
     reactor_lengths = np.linspace(0,12,num=100)
     inlet_mole_fractions = [0.2128,0.714,0.0259,0.0004,0.0119,0.035] #CH4,H20,H2,CO,CO2,N2
+    reactor_radii = np.array([[0.],[0.01606437],[0.02271845],[0.02782431],[0.03212874],[0.03592102],[0.03934951],[0.04250233],[0.0454369 ],[0.04819311],[0.0508    ]])
     bound_conds = [25.7,2.14,793,1100] #p,u_in,T_in,T_wall
     reactor_conds = [0.007, 10] #eta, n_elements
     
-    plot_analytical_solution = False #True,False
+    plot_analytical_solution = True #True,False
     
     input_size_NN = 1
     hidden_size_NN = 32
@@ -1839,16 +1846,16 @@ if __name__ == "__main__":
     optimizer = torch.optim.LBFGS(network.parameters(), lr=1, line_search_fn= \
                                   "strong_wolfe", max_eval=None, tolerance_grad \
                                       =1e-50, tolerance_change=1e-50)
-        
+
+    #x = torch.tensor(np.array([[i,j] for i in reactor_lengths for j in reactor_radii]), requires_grad=True)
     x = torch.tensor(np.repeat(reactor_lengths, reactor_conds[1]).reshape(-1, 1), requires_grad=True)
-    y = None
+    #y = None
     
     # Train the neural network
     calc_loss = PINN_loss(weight_factors, epsilon, inlet_mole_fractions, \
                           bound_conds, reactor_conds) 
     train(x, y, network, calc_loss, optimizer, num_epochs, plot_interval, \
           analytical_solution, model.n_N2_0, reactor_conds[1], reactor_lengths)
-    
     
     # Save model parameters
     #torch.save(network.state_dict(), 'PINN_state_03.10.23.pth')
